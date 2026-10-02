@@ -121,5 +121,6 @@ private:
     class SrtLink* livePrimary_ = nullptr;
     class SrtLink* liveCopy_ = nullptr;
     friend int writeEgress(void* opaque, std::uint8_t* buf, int size);
+    friend int writeEgress(void* opaque, std::uint8_t const* buf, int size);
 };
 } // namespace srtgw
