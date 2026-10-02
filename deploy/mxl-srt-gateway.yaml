@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mxl-srt-gateway
+  labels:
+    app.kubernetes.io/name: mxl-srt-gateway
+data:
+  gateway.json: |
+    {"channels":[]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-srt-gateway
+  labels:
+    app.kubernetes.io/name: mxl-srt-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-srt-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-srt-gateway
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: gateway
+          image: ghcr.io/leeo86/mxl-srt-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8120
+            - name: nmos
+              containerPort: 3272
+            - name: nmos-ws
+              containerPort: 3273
+          env:
+            - name: WEB_PORT
+              value: "8120"
+            - name: NMOS_PORT
+              value: "3272"
+            - name: NMOS_REGISTRY_ADDRESS
+              value: nmos-registry
+            - name: NMOS_REGISTRY_PORT
+              value: "3210"
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/srtgw
+            - name: SRTGW_CONFIG_FILE
+              value: /config/gateway.json
+            - name: SRTGW_PUBLIC_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DECODER
+              value: auto
+            - name: ENCODER
+              value: auto
+          volumeMounts:
+            - name: mxl
+              mountPath: /Volumes/mxl
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: mxl
+          hostPath:
+            path: /Volumes/mxl
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: mxl-srt-gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mxl-srt-gateway
+  labels:
+    app.kubernetes.io/name: mxl-srt-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: mxl-srt-gateway
+  ports:
+    - name: http
+      port: 8120
+      targetPort: http
+    - name: nmos
+      port: 3272
+      targetPort: nmos

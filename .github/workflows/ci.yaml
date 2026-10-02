@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      MXL_REF: 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
+      NMOS_CPP_REF: fe303849527394b03bdedc8f161f377fe458bb62
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl zip unzip tar \
+            bison flex autoconf automake libtool \
+            libboost-system-dev libboost-thread-dev libboost-chrono-dev \
+            libboost-date-time-dev libboost-regex-dev libboost-random-dev \
+            libboost-filesystem-dev libcpprest-dev nlohmann-json3-dev \
+            libssl-dev libavahi-compat-libdnssd-dev uuid-dev \
+            libsrt-gnutls-dev libgnutls28-dev nettle-dev \
+            libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev \
+            libswresample-dev libswscale-dev libx264-dev libsoxr-dev \
+            ffmpeg
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Cache MXL install
+        id: cache-mxl
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/mxl
+            mxl-vcpkg-installed
+          key: mxl-${{ env.MXL_REF }}-ubuntu-24.04-srtgw-v1
+
+      - name: Build MXL
+        if: steps.cache-mxl.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          git -c init.defaultBranch=main init /tmp/mxl
+          git -C /tmp/mxl remote add origin https://github.com/dmf-mxl/mxl.git
+          git -C /tmp/mxl fetch --depth 1 origin "$MXL_REF"
+          git -C /tmp/mxl checkout FETCH_HEAD
+          cmake -S /tmp/mxl -B /tmp/mxl/build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_UTILS=OFF -DBUILD_DOCS=OFF \
+            -DMXL_ENABLE_FABRICS_OFI=OFF \
+            -DCMAKE_INSTALL_PREFIX=/opt/mxl
+          cmake --build /tmp/mxl/build -j"$(nproc)"
+          sudo cmake --install /tmp/mxl/build
+          cp -r /tmp/mxl/build/vcpkg_installed/x64-linux mxl-vcpkg-installed
+
+      - name: Fetch nmos-cpp
+        run: |
+          git -c init.defaultBranch=main init /tmp/nmos-cpp
+          git -C /tmp/nmos-cpp remote add origin https://github.com/sony/nmos-cpp.git
+          git -C /tmp/nmos-cpp fetch --depth 1 origin "$NMOS_CPP_REF"
+          git -C /tmp/nmos-cpp -c advice.detachedHead=false checkout FETCH_HEAD
+
+      - name: Configure and build
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSRTGW_WITH_NMOS=ON \
+            -DNMOS_CPP_DIR=/tmp/nmos-cpp/Development \
+            "-DCMAKE_PREFIX_PATH=/opt/mxl;$PWD/mxl-vcpkg-installed"
+          cmake --build build -j"$(nproc)"
+
+      - name: Unit tests
+        run: ./build/unit-tests
+
+      - name: Integration
+        run: SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway

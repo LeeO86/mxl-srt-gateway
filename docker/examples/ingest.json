@@ -1,0 +1,11 @@
+{
+  "channels": [
+    {
+      "id": "loop",
+      "label": "Loop ingest",
+      "direction": "ingest",
+      "srt": {"mode": "listener", "local_port": 9000, "latency_ms": 200},
+      "target": {"width": 1920, "height": 1080, "scan": "progressive", "rate": "50"}
+    }
+  ]
+}

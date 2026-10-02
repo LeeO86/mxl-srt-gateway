@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-srt-gateway-gpu
+  labels:
+    app.kubernetes.io/name: mxl-srt-gateway
+    app.kubernetes.io/component: gpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-srt-gateway
+      app.kubernetes.io/component: gpu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-srt-gateway
+        app.kubernetes.io/component: gpu
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: gateway
+          image: ghcr.io/leeo86/mxl-srt-gateway:latest
+          env:
+            - name: DECODER
+              value: auto
+            - name: ENCODER
+              value: auto
+            - name: WEB_PORT
+              value: "8120"
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/srtgw-gpu
+            - name: SRTGW_PUBLIC_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+            - name: mxl
+              mountPath: /Volumes/mxl
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+      volumes:
+        - name: mxl
+          hostPath:
+            path: /Volumes/mxl
+            type: DirectoryOrCreate
