@@ -50,6 +50,24 @@ TEST_CASE("config environment overrides the file and defaults")
     CHECK(isUuid(loaded.config.mxlOutputDomainId));
 }
 
+TEST_CASE("a matrix patch keeps the channel label and the per-tap gains")
+{
+    auto original = channelFromJson("{\"id\":\"in1\",\"label\":\"Ingest 1\",\"direction\":\"ingest\"}", nullptr);
+    CHECK(original.label == "Ingest 1");
+    auto patched = channelFromJson(
+        "{\"id\":\"in1\",\"audio_outputs\":[{\"channels\":2,\"preset\":\"custom\",\"routes\":[[{\"track\":0,\"channel\":0,\"gain_db\":0},{\"track\":0,\"channel\":2,\"gain_db\":-3}],[{\"track\":1,\"channel\":1,\"gain_db\":-6,\"mute\":true}]]}],\"egress\":{\"audio_tracks\":[{\"codec\":\"aac\",\"layout\":\"stereo\",\"channels\":[4,1],\"language\":\"ger\",\"gain_db\":-1.5}]}}",
+        &original);
+    CHECK(patched.label == "Ingest 1");
+    CHECK(patched.audioOutputs.size() == 1);
+    CHECK(patched.audioOutputs[0].routes[0].size() == 2);
+    CHECK(patched.audioOutputs[0].routes[0][1].gainDb == doctest::Approx(-3.0));
+    CHECK(patched.audioOutputs[0].routes[1][0].mute);
+    CHECK(patched.egress.audioTracks[0].channels.size() == 2);
+    CHECK(patched.egress.audioTracks[0].channels[0] == 4);
+    CHECK(patched.egress.audioTracks[0].language == "ger");
+    CHECK(patched.egress.codec == original.egress.codec);
+}
+
 TEST_CASE("internet listener without a passphrase or streamid is rejected")
 {
     auto channel = defaultIngest("edge", 9000);
@@ -142,6 +160,9 @@ TEST_CASE("adaptation matrix covers the specification rows")
     auto const field = planAdaptation(i50, p50, "bwdif", "letterbox", "bicubic", "auto");
     CHECK(field.deint == Deint::BwdifField);
     CHECK(ffmpegFilter(field, false).find("bwdif=mode=send_field") != std::string::npos);
+    auto const fieldCuda = ffmpegFilter(field, true);
+    CHECK(fieldCuda.find("bwdif_cuda=mode=send_field") != std::string::npos);
+    CHECK(fieldCuda.find("hwdownload,format=nv12") != std::string::npos);
 
     auto const frame = planAdaptation(i50, p25, "bwdif", "letterbox", "bicubic", "auto");
     CHECK(frame.deint == Deint::BwdifFrame);
@@ -156,6 +177,9 @@ TEST_CASE("adaptation matrix covers the specification rows")
     auto const scaled = planAdaptation(p50, hd720, "bwdif", "fill", "lanczos", "auto");
     CHECK(scaled.scale);
     CHECK(ffmpegFilter(scaled, false).find("force_original_aspect_ratio=increase") != std::string::npos);
+    auto const scaledCuda = ffmpegFilter(scaled, true);
+    CHECK(scaledCuda.find("scale_cuda=1280:720:force_original_aspect_ratio=increase:interp_algo=lanczos") != std::string::npos);
+    CHECK(scaledCuda.find("hwdownload") < scaledCuda.find("crop=1280:720"));
 
     VideoFormat hd = p50;
     auto const color = planAdaptation(sd, hd, "yadif", "letterbox", "bicubic", "auto");

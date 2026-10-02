@@ -53,6 +53,106 @@ std::string ffError(int code)
     return buf;
 }
 
+bool cudaFilterChainAvailable(AdaptationPlan const& plan)
+{
+    bool const bwdif = plan.deint == Deint::BwdifField || plan.deint == Deint::BwdifFrame;
+    bool const yadif = plan.deint == Deint::YadifField || plan.deint == Deint::YadifFrame;
+    bool const otherDeint = plan.deint != Deint::None && !bwdif && !yadif;
+    if (otherDeint)
+    {
+        return false;
+    }
+    if (bwdif && avfilter_get_by_name("bwdif_cuda") == nullptr)
+    {
+        return false;
+    }
+    if (yadif && avfilter_get_by_name("yadif_cuda") == nullptr)
+    {
+        return false;
+    }
+    bool const scaleOnGpu = plan.scale && !plan.fieldShift && !plan.anamorphic;
+    if (scaleOnGpu && avfilter_get_by_name("scale_cuda") == nullptr)
+    {
+        return false;
+    }
+    if ((plan.fieldShift || plan.anamorphic) && !bwdif && !yadif)
+    {
+        return false;
+    }
+    return bwdif || yadif || scaleOnGpu;
+}
+
+int configureFilterGraph(AVFilterGraph** graph, AVFilterContext** source, AVFilterContext** sink, AVFrame* sample, AVRational timeBase, int sarNum,
+    int sarDen, std::string const& desc, bool cuda, AVPixelFormat sinkFmt)
+{
+    avfilter_graph_free(graph);
+    *source = nullptr;
+    *sink = nullptr;
+    if (sample == nullptr || sample->width <= 0 || sample->height <= 0 || desc.empty())
+    {
+        return AVERROR(EINVAL);
+    }
+    *graph = avfilter_graph_alloc();
+    if (*graph == nullptr)
+    {
+        return AVERROR(ENOMEM);
+    }
+    char args[256];
+    int const pix = cuda ? AV_PIX_FMT_CUDA : sample->format;
+    std::snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d", sample->width, sample->height, pix, timeBase.num,
+        timeBase.den, std::max(1, sarNum), std::max(1, sarDen));
+    int const srcOk = avfilter_graph_create_filter(source, avfilter_get_by_name("buffer"), "in", args, nullptr, *graph);
+    int const sinkOk = avfilter_graph_create_filter(sink, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, *graph);
+    if (cuda && *source != nullptr && sample->hw_frames_ctx != nullptr)
+    {
+        AVBufferSrcParameters* par = av_buffersrc_parameters_alloc();
+        if (par != nullptr)
+        {
+            par->format = AV_PIX_FMT_CUDA;
+            par->hw_frames_ctx = sample->hw_frames_ctx;
+            par->width = sample->width;
+            par->height = sample->height;
+            par->time_base = timeBase;
+            par->sample_aspect_ratio = AVRational{std::max(1, sarNum), std::max(1, sarDen)};
+            av_buffersrc_parameters_set(*source, par);
+            av_freep(&par);
+        }
+    }
+    if (*sink != nullptr)
+    {
+        enum AVPixelFormat const pixfmts[] = {sinkFmt, AV_PIX_FMT_NONE};
+        av_opt_set_int_list(*sink, "pix_fmts", pixfmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+    }
+    AVFilterInOut* outputs = avfilter_inout_alloc();
+    AVFilterInOut* inputs = avfilter_inout_alloc();
+    if (outputs == nullptr || inputs == nullptr || srcOk < 0 || sinkOk < 0 || *source == nullptr || *sink == nullptr)
+    {
+        int const error = srcOk < 0 ? srcOk : (sinkOk < 0 ? sinkOk : AVERROR(ENOMEM));
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+        avfilter_graph_free(graph);
+        *source = nullptr;
+        *sink = nullptr;
+        return error;
+    }
+    outputs->name = av_strdup("in");
+    outputs->filter_ctx = *source;
+    outputs->pad_idx = 0;
+    inputs->name = av_strdup("out");
+    inputs->filter_ctx = *sink;
+    inputs->pad_idx = 0;
+    int const parsed = avfilter_graph_parse_ptr(*graph, desc.c_str(), &inputs, &outputs, nullptr);
+    int const configured = parsed >= 0 ? avfilter_graph_config(*graph, nullptr) : parsed;
+    if (configured < 0)
+    {
+        avfilter_graph_free(graph);
+        *source = nullptr;
+        *sink = nullptr;
+        return configured;
+    }
+    return 0;
+}
+
 int latencyBucket(double seconds)
 {
     double const bounds[] = {0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64};
@@ -750,6 +850,7 @@ void IngestPipeline::runIo()
         AVFilterContext* sinkFilter = nullptr;
         VideoFormat filteredSource;
         bool haveGraph = false;
+        bool graphCuda = false;
         double offset = 0;
         bool haveOffset = false;
         std::int64_t frameIndex = 0;
@@ -773,35 +874,14 @@ void IngestPipeline::runIo()
                 {
                     while (avcodec_receive_frame(videoCtx, frame) >= 0)
                     {
-                        AVFrame* cpu = frame;
-                        AVFrame* transferred = nullptr;
-                        if (frame->format == AV_PIX_FMT_CUDA)
-                        {
-                            transferred = av_frame_alloc();
-                            if (av_hwframe_transfer_data(transferred, frame, 0) < 0)
-                            {
-                                av_frame_free(&transferred);
-                                std::lock_guard const lock{shared_->mediaMu};
-                                // Counted by the clock thread via decodeErrors on the status path.
-                            }
-                            else
-                            {
-                                transferred->pts = frame->pts;
-                                cpu = transferred;
-                            }
-                        }
-                        if (cpu == nullptr)
-                        {
-                            continue;
-                        }
-                        bool const interlaced = (cpu->flags & AV_FRAME_FLAG_INTERLACED) != 0;
-                        bool const top = (cpu->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) != 0;
+                        bool const interlaced = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+                        bool const top = (frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) != 0;
                         VideoFormat detected;
-                        detected.width = cpu->width;
-                        detected.height = cpu->height;
+                        detected.width = frame->width;
+                        detected.height = frame->height;
                         detected.interlaced = interlaced;
                         detected.fieldOrder = interlaced ? (top ? "tff" : "bff") : "progressive";
-                        AVRational guessed = av_guess_frame_rate(fmt, fmt->streams[videoStream], cpu);
+                        AVRational guessed = av_guess_frame_rate(fmt, fmt->streams[videoStream], frame);
                         if (guessed.num <= 0)
                         {
                             guessed = fmt->streams[videoStream]->avg_frame_rate;
@@ -820,63 +900,100 @@ void IngestPipeline::runIo()
                         {
                             detected.rate.name = std::to_string(detected.rate.num) + "/" + std::to_string(detected.rate.den);
                         }
-                        detected.sarNum = cpu->sample_aspect_ratio.num > 0 ? cpu->sample_aspect_ratio.num : 1;
-                        detected.sarDen = cpu->sample_aspect_ratio.den > 0 ? cpu->sample_aspect_ratio.den : 1;
-                        detected.color = cpu->colorspace == AVCOL_SPC_BT470BG || cpu->colorspace == AVCOL_SPC_SMPTE170M ? "bt601" : "bt709";
+                        detected.sarNum = frame->sample_aspect_ratio.num > 0 ? frame->sample_aspect_ratio.num : 1;
+                        detected.sarDen = frame->sample_aspect_ratio.den > 0 ? frame->sample_aspect_ratio.den : 1;
+                        detected.color = frame->colorspace == AVCOL_SPC_BT470BG || frame->colorspace == AVCOL_SPC_SMPTE170M ? "bt601" : "bt709";
                         if (detected.width != filteredSource.width || detected.height != filteredSource.height || detected.interlaced != filteredSource.interlaced ||
                             !detected.rate.sameAs(filteredSource.rate) || filteredSource.fieldOrder != detected.fieldOrder)
                         {
-                            if (graph != nullptr)
-                            {
-                                avfilter_graph_free(&graph);
-                            }
-                            graph = avfilter_graph_alloc();
                             auto const plan = planAdaptation(detected, config_.target, config_.deinterlacer, config_.aspect, config_.scale, config_.sourceScan);
-                            std::string desc = ffmpegFilter(plan, false);
-                            if (detected.interlaced)
+                            auto const timeBase = fmt->streams[videoStream]->time_base;
+                            bool built = false;
+                            graphCuda = false;
+                            if (frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx != nullptr && cudaFilterChainAvailable(plan))
                             {
-                                desc = std::string("setfield=") + (detected.fieldOrder == "bff" ? "bff" : "tff") + "," + desc;
+                                std::string const desc = ffmpegFilter(plan, true);
+                                int const graphError = configureFilterGraph(&graph, &sourceFilter, &sinkFilter, frame, timeBase, detected.sarNum, detected.sarDen, desc,
+                                    true, AV_PIX_FMT_YUV422P10LE);
+                                built = graphError >= 0;
+                                if (built)
+                                {
+                                    graphCuda = true;
+                                    log::info("adapter_configured", {{"channel", config_.id}, {"plan", plan.summary}, {"cuda", "true"}});
+                                }
+                                else
+                                {
+                                    log::info("cuda_filter_fallback", {{"channel", config_.id}, {"graph", desc}, {"error", ffError(graphError)}});
+                                }
                             }
-                            char args[256];
-                            std::snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d", cpu->width, cpu->height, cpu->format,
-                                fmt->streams[videoStream]->time_base.num, fmt->streams[videoStream]->time_base.den, std::max(1, detected.sarNum),
-                                std::max(1, detected.sarDen));
-                            int const graphOk = avfilter_graph_create_filter(&sourceFilter, avfilter_get_by_name("buffer"), "in", args, nullptr, graph);
-                            int sinkOk = avfilter_graph_create_filter(&sinkFilter, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph);
-                            enum AVPixelFormat const pixfmts[] = {AV_PIX_FMT_YUV422P10LE, AV_PIX_FMT_NONE};
-                            av_opt_set_int_list(sinkFilter, "pix_fmts", pixfmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
-                            AVFilterInOut* outputs = avfilter_inout_alloc();
-                            AVFilterInOut* inputs = avfilter_inout_alloc();
-                            outputs->name = av_strdup("in");
-                            outputs->filter_ctx = sourceFilter;
-                            outputs->pad_idx = 0;
-                            inputs->name = av_strdup("out");
-                            inputs->filter_ctx = sinkFilter;
-                            inputs->pad_idx = 0;
-                            int const parsed = avfilter_graph_parse_ptr(graph, desc.c_str(), &inputs, &outputs, nullptr);
-                            int const configured = parsed >= 0 ? avfilter_graph_config(graph, nullptr) : parsed;
-                            if (graphOk < 0 || sinkOk < 0 || configured < 0)
+                            AVFrame* probe = nullptr;
+                            AVFrame* sample = frame;
+                            if (!built && frame->format == AV_PIX_FMT_CUDA)
                             {
-                                log::error("filter_graph_failed", {{"channel", config_.id}, {"graph", desc}, {"error", ffError(configured)}});
-                                avfilter_graph_free(&graph);
-                                haveGraph = false;
+                                probe = av_frame_alloc();
+                                if (probe != nullptr && av_hwframe_transfer_data(probe, frame, 0) >= 0)
+                                {
+                                    probe->pts = frame->pts;
+                                    probe->sample_aspect_ratio = frame->sample_aspect_ratio;
+                                    sample = probe;
+                                }
+                                else
+                                {
+                                    av_frame_free(&probe);
+                                }
                             }
-                            else
+                            if (!built && sample->format != AV_PIX_FMT_CUDA)
                             {
-                                haveGraph = true;
-                                filteredSource = detected;
-                                log::info("adapter_configured", {{"channel", config_.id}, {"plan", plan.summary}});
+                                std::string desc = ffmpegFilter(plan, false);
+                                if (detected.interlaced)
+                                {
+                                    desc = std::string("setfield=") + (detected.fieldOrder == "bff" ? "bff" : "tff") + "," + desc;
+                                }
+                                int const graphError = configureFilterGraph(&graph, &sourceFilter, &sinkFilter, sample, timeBase, detected.sarNum, detected.sarDen, desc, false,
+                                    AV_PIX_FMT_YUV422P10LE);
+                                built = graphError >= 0;
+                                graphCuda = false;
+                                if (!built)
+                                {
+                                    log::error("filter_graph_failed", {{"channel", config_.id}, {"graph", desc}, {"error", ffError(graphError)}});
+                                }
+                                else
+                                {
+                                    log::info("adapter_configured", {{"channel", config_.id}, {"plan", plan.summary}, {"cuda", "false"}});
+                                }
                             }
+                            else if (!built)
+                            {
+                                log::error("filter_graph_failed", {{"channel", config_.id}, {"reason", "cuda_download"}});
+                            }
+                            av_frame_free(&probe);
+                            haveGraph = built;
                             filteredSource = detected;
                             std::lock_guard const lock{shared_->mediaMu};
                             shared_->source = detected;
                             shared_->sourceKnown = true;
                             shared_->sourceFormat = detected.label();
                         }
-                        if (haveGraph)
+                        AVFrame* input = frame;
+                        AVFrame* transferred = nullptr;
+                        if (haveGraph && !graphCuda && frame->format == AV_PIX_FMT_CUDA)
                         {
-                            cpu->pts = frame->pts;
-                            if (av_buffersrc_add_frame_flags(sourceFilter, cpu, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0)
+                            transferred = av_frame_alloc();
+                            if (transferred != nullptr && av_hwframe_transfer_data(transferred, frame, 0) >= 0)
+                            {
+                                transferred->pts = frame->pts;
+                                input = transferred;
+                            }
+                            else
+                            {
+                                av_frame_free(&transferred);
+                                input = nullptr;
+                            }
+                        }
+                        if (haveGraph && input != nullptr)
+                        {
+                            input->pts = frame->pts;
+                            if (av_buffersrc_add_frame_flags(sourceFilter, input, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0)
                             {
                                 while (av_buffersink_get_frame(sinkFilter, filtered) >= 0)
                                 {
@@ -1300,7 +1417,11 @@ PipelineStatus EgressPipeline::status() const
     return status_;
 }
 
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+int writeEgress(void* opaque, std::uint8_t const* buf, int size)
+#else
 int writeEgress(void* opaque, std::uint8_t* buf, int size)
+#endif
 {
     auto* self = static_cast<EgressPipeline*>(opaque);
     if (self->livePrimary_ != nullptr && self->livePrimary_->connected())

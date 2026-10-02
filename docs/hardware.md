@@ -1,9 +1,13 @@
 # Hardware notes
 
 These measurements are for a lab host with the NVIDIA driver and the container
-started with `--gpus all` (or `runtimeClassName: nvidia`). The same image starts
-on a host with no GPU: `DECODER=auto` and `ENCODER=auto` stay on the CPU path
-when NVDEC, NVENC or CUDA device creation fails.
+started with `--gpus all` (or `runtimeClassName: nvidia`). The image sets
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`; without `video` the toolkit
+does not mount `libnvcuvid` or `libnvidia-encode`, and NVDEC/NVENC cannot open.
+The same image starts on a host with no GPU: `DECODER=auto` and `ENCODER=auto`
+stay on the CPU path when NVDEC, NVENC or CUDA device creation fails. CUDA
+filters are used on ingest when NVDEC produced a device frame. Egress encode
+uses NVENC after the CPU v210 adapter.
 
 ## What to record
 

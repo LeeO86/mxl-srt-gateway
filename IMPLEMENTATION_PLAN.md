@@ -25,6 +25,8 @@ FFmpeg configure line used by `docker/Dockerfile`:
   --enable-openssl \
   --enable-ffnvcodec --enable-nvdec --enable-nvenc \
   --enable-cuda-llvm \
+  --nvcc=clang \
+  --nvccflags="--cuda-gpu-arch=sm_75 -O2" \
   --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
   --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib"
 ```
@@ -70,11 +72,19 @@ both.
    public or node address a remote caller must use.
 4. **Frame-rate conversion** is repeat/drop in the synchroniser. There is no
    motion interpolator (out of scope, §13).
-5. **CUDA filters** are requested by name (`bwdif_cuda`, `scale_cuda`) when the
-   build has them. If the graph fails, or NVDEC cannot open a 4:2:2 stream,
-   that channel falls back to CPU and says so in the log and in `codec_info`.
-   libcudart is not linked into this binary; FFmpeg loads it when a CUDA filter
-   is used. The process starts with no GPU.
+5. **CUDA filters** (`bwdif_cuda`, `yadif_cuda`, `scale_cuda`) are compiled with
+   Clang's NVPTX backend (`--enable-cuda-llvm`, `--cuda-gpu-arch=sm_75`).
+   FFmpeg 7.1 marks `--enable-cuda-nvcc` nonfree, so that switch is not used:
+   the image stays GPL-2.0-or-later from libx264 and libx265. sm_75 covers
+   Turing and later, including the A4000 and L4. The filters dlopen `libcuda`;
+   `libcudart` is not linked, so the process starts with no GPU. `libcuda`,
+   `libnvidia-encode` and `libnvcuvid` come from the NVIDIA Container Toolkit
+   when the container is started with a GPU and
+   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`. On ingest, an NVDEC
+   frame stays on the device when the plan is a CUDA deinterlace or scale and
+   those filters exist. A failed graph or a failed device open downloads that
+   channel to the CPU graph. Egress adapts v210 on the CPU (that packing is
+   not a `scale_cuda` input) and then tries NVENC.
 6. **Rendezvous** is implemented (`SRTO_RENDEZVOUS`) but not required by the tests.
 
 ## MXL calls that matter

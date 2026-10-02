@@ -51,3 +51,16 @@ th, td { border-bottom: 1px solid var(--line); padding: 0.35rem; text-align: lef
 pre { white-space: pre-wrap; background: #0f141b; padding: 0.7rem; border-radius: 8px; }
 .err { color: var(--red); }
 .request { font-family: ui-monospace, monospace; font-size: 0.78rem; color: var(--amber); }
+.hint { color: var(--muted); font-size: 0.82rem; }
+.modal .matrix-card { display: flex; flex-direction: column; overflow: hidden; width: min(1200px, 100%); }
+.matrix-body { overflow: auto; min-height: 0; }
+.save-row { flex: none; padding-top: 0.7rem; }
+.matrix-scroll { overflow: auto; max-height: 52vh; margin-top: 0.6rem; }
+.matrix { font-size: 0.72rem; }
+.matrix th, .matrix td { text-align: center; white-space: nowrap; padding: 0.2rem; }
+.matrix .src { position: sticky; left: 0; background: var(--panel); text-align: left; z-index: 1; }
+.matrix input.gain { width: 4.2rem; padding: 0.15rem; }
+.xp { width: 18px; height: 18px; padding: 0; border-radius: 3px; }
+.xp.on { background: var(--cyan); border-color: var(--cyan); }
+.track-card { border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; margin-top: 0.5rem; }
+label.check { flex-direction: row; align-items: center; }
