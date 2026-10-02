@@ -1417,7 +1417,11 @@ PipelineStatus EgressPipeline::status() const
     return status_;
 }
 
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+int writeEgress(void* opaque, std::uint8_t const* buf, int size)
+#else
 int writeEgress(void* opaque, std::uint8_t* buf, int size)
+#endif
 {
     auto* self = static_cast<EgressPipeline*>(opaque);
     if (self->livePrimary_ != nullptr && self->livePrimary_->connected())
