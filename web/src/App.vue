@@ -8,10 +8,284 @@ const nmos = ref({});
 const config = ref({});
 const error = ref("");
 const editing = ref(null);
-const matrixFor = ref(null);
-const matrixPreset = ref("16ch-stereo");
-const egressPreset = ref("8x-stereo-aac");
+const matrixChannel = ref(null);
+const matrixRoutes = ref([]);
+const matrixOutCount = ref(16);
+const matrixGains = ref([]);
+const matrixMutes = ref([]);
+const matrixTracks = ref([]);
+const matrixMxlCount = ref(16);
+const matrixSourceTracks = ref(8);
+const matrixSourceChannels = ref(2);
+const matrixError = ref("");
 let socket;
+
+const ingestPresets = [
+  ["sequential", "Sequential"],
+  ["16ch-stereo", "16 ch from 8 stereo"],
+  ["5.1+stereo", "5.1 + stereo"],
+  ["302m-16", "302M 16 ch"],
+  ["5.1-stereo-downmix", "5.1 to stereo"],
+  ["mono-dual", "Mono to dual mono"],
+];
+const egressPresets = [
+  ["8x-stereo-aac", "8 × stereo AAC"],
+  ["16ch-302m", "16 ch 302M"],
+  ["5.1+stereo", "5.1 + stereo"],
+  ["stereo", "Stereo"],
+];
+
+function layoutChannels(layout) {
+  if (layout === "mono") return 1;
+  if (layout === "5.1" || layout === "5.1(side)") return 6;
+  if (layout === "7.1") return 8;
+  return 2;
+}
+
+function defaultAudioBitrate(codec, layout) {
+  const channels = layoutChannels(layout);
+  if (codec === "mp2") return channels <= 1 ? 128000 : 256000;
+  if (codec === "s302m" || codec === "302m") return 0;
+  if (codec === "opus") return channels <= 2 ? 128000 : 256000;
+  if (channels <= 1) return 96000;
+  if (channels <= 2) return 192000;
+  if (channels <= 6) return 384000;
+  return 512000;
+}
+
+function emptyRoutes(count) {
+  return Array.from({ length: count }, () => []);
+}
+
+function tap(track, channel, gain = 0) {
+  return { track, channel, gain_db: gain, mute: false };
+}
+
+function presetIngestRoutes(name, channels) {
+  const routes = emptyRoutes(channels);
+  if (name === "5.1+stereo") {
+    for (let i = 0; i < Math.min(6, channels); i++) routes[i].push(tap(0, i));
+    if (channels > 6) routes[6].push(tap(1, 0));
+    if (channels > 7) routes[7].push(tap(1, 1));
+  } else if (name === "302m-16") {
+    for (let i = 0; i < channels; i++) routes[i].push(tap(Math.floor(i / 8), i % 8));
+  } else if (name === "5.1-stereo-downmix") {
+    if (channels >= 1) routes[0] = [tap(0, 0), tap(0, 2, -3), tap(0, 4, -3)];
+    if (channels >= 2) routes[1] = [tap(0, 1), tap(0, 2, -3), tap(0, 5, -3)];
+  } else if (name === "mono-dual") {
+    if (channels >= 1) routes[0].push(tap(0, 0));
+    if (channels >= 2) routes[1].push(tap(0, 0));
+  } else if (name === "16ch-stereo") {
+    for (let i = 0; i < channels; i++) routes[i].push(tap(Math.floor(i / 2), i % 2));
+  } else {
+    for (let i = 0; i < channels; i++) routes[i].push(tap(0, i));
+  }
+  return routes;
+}
+
+function presetEgressTracks(name) {
+  if (name === "16ch-302m") {
+    return [0, 1].map((part) => ({
+      codec: "s302m",
+      layout: "7.1",
+      channels: Array.from({ length: 8 }, (_, ch) => part * 8 + ch),
+      bitrate: 0,
+      language: "und",
+      gain_db: 0,
+      mute: false,
+      pid: 0,
+    }));
+  }
+  if (name === "5.1+stereo") {
+    return [
+      { codec: "aac", layout: "5.1", channels: [0, 1, 2, 3, 4, 5], bitrate: 384000, language: "und", gain_db: 0, mute: false, pid: 0 },
+      { codec: "aac", layout: "stereo", channels: [6, 7], bitrate: 192000, language: "und", gain_db: 0, mute: false, pid: 0 },
+    ];
+  }
+  const pairs = name === "8x-stereo-aac" ? 8 : 1;
+  return Array.from({ length: pairs }, (_, i) => ({
+    codec: "aac",
+    layout: "stereo",
+    channels: [i * 2, i * 2 + 1],
+    bitrate: 192000,
+    language: "und",
+    gain_db: 0,
+    mute: false,
+    pid: 0,
+  }));
+}
+
+function syncColumnMeta() {
+  const gains = [];
+  const mutes = [];
+  for (let i = 0; i < matrixOutCount.value; i++) {
+    const column = matrixRoutes.value[i] || [];
+    gains.push(column.length ? Number(column[0].gain_db) || 0 : matrixGains.value[i] || 0);
+    mutes.push(column.length ? column.every((item) => item.mute) : Boolean(matrixMutes.value[i]));
+  }
+  matrixGains.value = gains;
+  matrixMutes.value = mutes;
+}
+
+function applyColumnMeta() {
+  matrixRoutes.value.forEach((column, index) => {
+    for (const item of column) {
+      item.gain_db = Number(matrixGains.value[index]) || 0;
+      item.mute = Boolean(matrixMutes.value[index]);
+    }
+  });
+}
+
+const matrixSourceRows = computed(() => {
+  if (!matrixChannel.value) return [];
+  const live = liveById.value[matrixChannel.value.id];
+  const decoded = (live && live.tracks) || [];
+  const rows = [];
+  const tracksN = Math.max(1, Math.min(32, Number(matrixSourceTracks.value) || 1));
+  const channelsN = Math.max(1, Math.min(16, Number(matrixSourceChannels.value) || 1));
+  if (decoded.length) {
+    decoded.forEach((track, index) => {
+      const count = Number.parseInt(track.layout, 10) || 2;
+      for (let channel = 0; channel < count; channel++) {
+        rows.push({
+          track: index,
+          channel,
+          label: `T${index + 1}.${channel + 1}`,
+          detail: `${track.codec || "audio"} ${track.layout || ""} ${track.language || ""} pid ${track.pid || "—"}${track.missing ? " · missing" : ""}`,
+        });
+      }
+    });
+  } else {
+    for (let track = 0; track < tracksN; track++) {
+      for (let channel = 0; channel < channelsN; channel++) {
+        rows.push({ track, channel, label: `T${track + 1}.${channel + 1}`, detail: "waiting for the stream" });
+      }
+    }
+  }
+  const seen = new Set(rows.map((row) => `${row.track}:${row.channel}`));
+  matrixRoutes.value.forEach((column) => {
+    for (const item of column) {
+      const key = `${item.track}:${item.channel}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        rows.push({ track: item.track, channel: item.channel, label: `T${item.track + 1}.${item.channel + 1}`, detail: "routed, not in the stream" });
+      }
+    }
+  });
+  return rows;
+});
+
+const matrixMxlRows = computed(() => {
+  const count = Math.max(1, Math.min(64, Number(matrixMxlCount.value) || 1));
+  return Array.from({ length: count }, (_, index) => index);
+});
+
+function routed(row, output) {
+  return (matrixRoutes.value[output] || []).some((item) => item.track === row.track && item.channel === row.channel);
+}
+
+function toggleRoute(row, output) {
+  const column = matrixRoutes.value[output] || (matrixRoutes.value[output] = []);
+  const at = column.findIndex((item) => item.track === row.track && item.channel === row.channel);
+  if (at >= 0) column.splice(at, 1);
+  else column.push({ track: row.track, channel: row.channel, gain_db: Number(matrixGains.value[output]) || 0, mute: Boolean(matrixMutes.value[output]) });
+}
+
+function setOutCount(value) {
+  const count = Math.max(2, Math.min(64, Number(value) || 2));
+  matrixOutCount.value = count;
+  while (matrixRoutes.value.length < count) matrixRoutes.value.push([]);
+  matrixRoutes.value.splice(count);
+  syncColumnMeta();
+}
+
+function applyIngestPreset(name) {
+  matrixRoutes.value = presetIngestRoutes(name, matrixOutCount.value);
+  matrixGains.value = [];
+  matrixMutes.value = [];
+  syncColumnMeta();
+}
+
+function egressSource(trackIndex, slot) {
+  const track = matrixTracks.value[trackIndex];
+  if (!track || !track.channels) return -1;
+  const value = track.channels[slot];
+  return value === undefined ? -1 : value;
+}
+
+function setEgressSource(trackIndex, slot, source) {
+  const track = matrixTracks.value[trackIndex];
+  if (!track) return;
+  if (!Array.isArray(track.channels)) track.channels = [];
+  while (track.channels.length <= slot) track.channels.push(-1);
+  track.channels[slot] = track.channels[slot] === source ? -1 : source;
+}
+
+function setTrackLayout(track, layout) {
+  const count = layoutChannels(layout);
+  const next = (track.channels || []).slice(0, count);
+  while (next.length < count) next.push(next.length ? next[next.length - 1] + 1 : 0);
+  track.layout = layout;
+  track.channels = next;
+  track.bitrate = defaultAudioBitrate(track.codec, layout);
+}
+
+function setTrackCodec(track, codec) {
+  track.codec = codec;
+  track.bitrate = defaultAudioBitrate(codec, track.layout);
+}
+
+function addEgressTrack() {
+  if (matrixTracks.value.length >= 16) return;
+  const start = matrixTracks.value.reduce((max, track) => Math.max(max, ...((track.channels || []).map((channel) => channel + 1))), 0);
+  matrixTracks.value.push({
+    codec: "aac",
+    layout: "stereo",
+    channels: [start, start + 1],
+    bitrate: 192000,
+    language: "und",
+    gain_db: 0,
+    mute: false,
+    pid: 0,
+  });
+  matrixMxlCount.value = Math.max(matrixMxlCount.value, start + 2);
+}
+
+function applyEgressPreset(name) {
+  matrixTracks.value = presetEgressTracks(name);
+  const highest = matrixTracks.value.reduce((max, track) => Math.max(max, ...((track.channels || []).map((channel) => channel + 1))), 0);
+  matrixMxlCount.value = Math.max(16, highest);
+}
+
+function openMatrix(channel) {
+  matrixError.value = "";
+  matrixChannel.value = channel;
+  const output = (channel.audio_outputs && channel.audio_outputs[0]) || { channels: 16, routes: [] };
+  matrixOutCount.value = Math.max(2, Math.min(64, Number(output.channels) || 16));
+  matrixRoutes.value = JSON.parse(JSON.stringify(output.routes || []));
+  while (matrixRoutes.value.length < matrixOutCount.value) matrixRoutes.value.push([]);
+  matrixRoutes.value.splice(matrixOutCount.value);
+  matrixGains.value = [];
+  matrixMutes.value = [];
+  syncColumnMeta();
+  const tracks = (channel.egress && channel.egress.audio_tracks) || [];
+  matrixTracks.value = JSON.parse(JSON.stringify(tracks));
+  let highest = 0;
+  let sourceTracks = 1;
+  let sourceChannels = 2;
+  matrixRoutes.value.forEach((column) => {
+    for (const item of column) {
+      sourceTracks = Math.max(sourceTracks, item.track + 1);
+      sourceChannels = Math.max(sourceChannels, item.channel + 1);
+    }
+  });
+  matrixTracks.value.forEach((track) => {
+    for (const channelIndex of track.channels || []) highest = Math.max(highest, channelIndex + 1);
+  });
+  matrixSourceTracks.value = Math.max(8, sourceTracks);
+  matrixSourceChannels.value = Math.max(2, sourceChannels);
+  matrixMxlCount.value = Math.max(16, highest);
+}
 
 const liveById = computed(() => {
   const map = {};
@@ -116,13 +390,44 @@ async function remove(id) {
   await loadChannels();
 }
 
-async function applyMatrix() {
-  await fetch(`/api/v1/channels/${matrixFor.value}/matrix`, {
+function commitColumns() {
+  matrixRoutes.value.forEach((column, index) => {
+    if (!column.length) return;
+    const gain = Number(matrixGains.value[index]) || 0;
+    if (gain !== (Number(column[0].gain_db) || 0)) {
+      for (const item of column) item.gain_db = gain;
+    }
+    const mute = Boolean(matrixMutes.value[index]);
+    if (mute !== Boolean(column[0].mute)) {
+      for (const item of column) item.mute = mute;
+    }
+  });
+}
+
+async function saveMatrix() {
+  matrixError.value = "";
+  commitColumns();
+  const body = {
+    audio_outputs: [
+      {
+        channels: matrixOutCount.value,
+        preset: "custom",
+        routes: matrixRoutes.value.slice(0, matrixOutCount.value),
+      },
+    ],
+    egress: { audio_tracks: matrixTracks.value },
+  };
+  const response = await fetch(`/api/v1/channels/${matrixChannel.value.id}/matrix`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ preset: matrixPreset.value, egress_preset: egressPreset.value }),
+    body: JSON.stringify(body),
   });
-  matrixFor.value = null;
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    matrixError.value = payload.error || response.statusText;
+    return;
+  }
+  matrixChannel.value = null;
   await loadChannels();
 }
 
@@ -193,6 +498,7 @@ onUnmounted(() => socket && socket.close());
             <i v-for="(meter, index) in ((liveById[channel.id] || {}).meters || []).slice(0, 16)" :key="index" :style="{ height: meterHeight(meter) }" :title="index"></i>
           </div>
           <p v-if="((liveById[channel.id] || {}).alarms || []).length" class="err">{{ (liveById[channel.id] || {}).alarms.join(", ") }}</p>
+          <button @click="openMatrix(channel)">Audio matrix</button>
         </article>
         <p v-if="!channels.length">No channels yet. Create one on the Channels tab.</p>
       </section>
@@ -214,7 +520,7 @@ onUnmounted(() => socket && socket.close());
                 <td>{{ channel.srt.exposure }}{{ channel.srt.passphrase_set ? " · key set" : "" }}</td>
                 <td class="row">
                   <button @click="edit(channel)">Edit</button>
-                  <button @click="matrixFor = channel.id">Audio</button>
+                  <button @click="openMatrix(channel)">Audio</button>
                   <button class="warn" @click="remove(channel.id)">Delete</button>
                 </td>
               </tr>
@@ -308,32 +614,106 @@ onUnmounted(() => socket && socket.close());
       </div>
     </div>
 
-    <div v-if="matrixFor" class="modal" @click.self="matrixFor = null">
-      <div class="card">
-        <h2>Audio matrix · {{ matrixFor }}</h2>
-        <div class="form">
-          <label>Ingest preset
-            <select v-model="matrixPreset">
-              <option value="sequential">sequential</option>
-              <option value="16ch-stereo">16 ch from 8 stereo PIDs</option>
-              <option value="5.1+stereo">5.1 + stereo</option>
-              <option value="302m-16">302M 16 ch</option>
-              <option value="5.1-stereo-downmix">5.1 to stereo</option>
-              <option value="mono-dual">mono to dual stereo</option>
-            </select>
-          </label>
-          <label>Egress preset
-            <select v-model="egressPreset">
-              <option value="8x-stereo-aac">8 × stereo AAC</option>
-              <option value="16ch-302m">16 ch 302M</option>
-              <option value="5.1+stereo">5.1 + stereo</option>
-              <option value="stereo">stereo</option>
-            </select>
-          </label>
+    <div v-if="matrixChannel" class="modal" @click.self="matrixChannel = null">
+      <div class="card matrix-card">
+        <h2>Audio matrix · {{ matrixChannel.label || matrixChannel.id }}</h2>
+        <div class="matrix-body">
+        <p v-if="matrixError" class="err">{{ matrixError }}</p>
+        <template v-if="matrixChannel.direction !== 'egress'">
+          <p class="hint">Rows are decoded channels. Columns are MXL outputs. A column can sum several sources. Gain and mute apply to that output.</p>
+          <div class="row">
+            <button v-for="preset in ingestPresets" :key="preset[0]" @click="applyIngestPreset(preset[0])">{{ preset[1] }}</button>
+          </div>
+          <div class="form" style="margin-top: 0.6rem">
+            <label>MXL channels<input :value="matrixOutCount" type="number" min="2" max="64" @change="setOutCount($event.target.value)" /></label>
+            <label v-if="!((liveById[matrixChannel.id] || {}).tracks || []).length">Source tracks<input v-model.number="matrixSourceTracks" type="number" min="1" max="32" /></label>
+            <label v-if="!((liveById[matrixChannel.id] || {}).tracks || []).length">Channels / track<input v-model.number="matrixSourceChannels" type="number" min="1" max="16" /></label>
+          </div>
+          <div class="matrix-scroll">
+            <table class="matrix">
+              <thead>
+                <tr>
+                  <th class="src">Source</th>
+                  <th v-for="output in matrixOutCount" :key="output">Out {{ output }}</th>
+                </tr>
+                <tr>
+                  <th class="src">Gain dB</th>
+                  <th v-for="output in matrixOutCount" :key="'g' + output"><input class="gain" v-model.number="matrixGains[output - 1]" type="number" step="0.5" @change="applyColumnMeta" /></th>
+                </tr>
+                <tr>
+                  <th class="src">Mute</th>
+                  <th v-for="output in matrixOutCount" :key="'m' + output"><input v-model="matrixMutes[output - 1]" type="checkbox" @change="applyColumnMeta" /></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in matrixSourceRows" :key="row.track + ':' + row.channel">
+                  <th class="src" :title="row.detail">{{ row.label }}</th>
+                  <td v-for="output in matrixOutCount" :key="output">
+                    <button class="xp" :class="{ on: routed(row, output - 1) }" @click="toggleRoute(row, output - 1)" :title="row.detail"></button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <template v-else>
+          <p class="hint">Rows are MXL channels. Each column is one channel of an egress PID. A slot takes a single source; click it again to clear.</p>
+          <div class="row">
+            <button v-for="preset in egressPresets" :key="preset[0]" @click="applyEgressPreset(preset[0])">{{ preset[1] }}</button>
+            <button @click="addEgressTrack">Add track</button>
+          </div>
+          <div class="form" style="margin: 0.6rem 0">
+            <label>MXL channels<input v-model.number="matrixMxlCount" type="number" min="1" max="64" /></label>
+          </div>
+          <div class="matrix-scroll">
+            <table class="matrix">
+              <thead>
+                <tr>
+                  <th class="src">MXL</th>
+                  <template v-for="(track, index) in matrixTracks" :key="'h' + index">
+                    <th v-for="slot in track.channels.length" :key="index + '-' + slot">A{{ index + 1 }}.{{ slot }}</th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="source in matrixMxlRows" :key="source">
+                  <th class="src">Ch {{ source + 1 }}</th>
+                  <template v-for="(track, index) in matrixTracks" :key="'r' + index">
+                    <td v-for="slot in track.channels.length" :key="index + '-' + slot">
+                      <button class="xp" :class="{ on: egressSource(index, slot - 1) === source }" @click="setEgressSource(index, slot - 1, source)"></button>
+                    </td>
+                  </template>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-for="(track, index) in matrixTracks" :key="index" class="track-card">
+            <div class="row">
+              <b>Track {{ index + 1 }}</b>
+              <button class="warn" @click="matrixTracks.splice(index, 1)">Remove</button>
+            </div>
+            <div class="form">
+              <label>Codec
+                <select :value="track.codec" @change="setTrackCodec(track, $event.target.value)">
+                  <option>aac</option><option>mp2</option><option>s302m</option><option>opus</option><option>ac3</option>
+                </select>
+              </label>
+              <label>Layout
+                <select :value="track.layout" @change="setTrackLayout(track, $event.target.value)">
+                  <option>mono</option><option>stereo</option><option>5.1</option><option>7.1</option>
+                </select>
+              </label>
+              <label>Language<input v-model="track.language" /></label>
+              <label>Bitrate<input v-model.number="track.bitrate" type="number" /></label>
+              <label>Gain dB<input v-model.number="track.gain_db" type="number" step="0.5" /></label>
+              <label class="check">Mute<input v-model="track.mute" type="checkbox" /></label>
+            </div>
+          </div>
+        </template>
         </div>
-        <div class="row" style="margin-top: 0.8rem">
-          <button class="primary" @click="applyMatrix">Apply presets</button>
-          <button @click="matrixFor = null">Close</button>
+        <div class="row save-row">
+          <button class="primary" @click="saveMatrix">Save matrix</button>
+          <button @click="matrixChannel = null">Close</button>
         </div>
       </div>
     </div>

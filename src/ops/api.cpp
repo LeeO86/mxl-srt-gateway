@@ -240,7 +240,15 @@ HttpResponse Api::handle(HttpRequest const& request) const
                     {
                         patch += ",\"audio_outputs\":" + json::field(body, "audio_outputs")->serialize();
                     }
-                    if (json::has(body, "egress_preset"))
+                    if (json::has(body, "egress"))
+                    {
+                        patch += ",\"egress\":" + json::field(body, "egress")->serialize();
+                    }
+                    else if (json::has(body, "audio_tracks"))
+                    {
+                        patch += ",\"egress\":{\"audio_tracks\":" + json::field(body, "audio_tracks")->serialize() + "}";
+                    }
+                    else if (json::has(body, "egress_preset"))
                     {
                         patch += ",\"egress\":{\"preset\":\"" + json::fieldString(body, "egress_preset", "8x-stereo-aac") + "\"}";
                     }

@@ -26,6 +26,8 @@ spec:
               value: auto
             - name: ENCODER
               value: auto
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility,video
             - name: WEB_PORT
               value: "8120"
             - name: MXL_DOMAIN_SCAN_PATH

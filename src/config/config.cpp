@@ -742,7 +742,7 @@ ChannelConfig channelFromJson(std::string const& text, ChannelConfig const* prev
     }
     ChannelConfig channel = previous != nullptr ? *previous : defaultIngest("ch", 0);
     channel.id = json::fieldString(root, "id", channel.id);
-    channel.label = json::fieldString(root, "label", channel.id);
+    channel.label = json::fieldString(root, "label", channel.label);
     channel.direction = json::fieldString(root, "direction", channel.direction);
     channel.enabled = json::fieldBool(root, "enabled", channel.enabled);
     if (channel.direction == "egress" && previous == nullptr && !json::has(root, "srt"))

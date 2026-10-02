@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 # Pins are the single source of truth shared with CI and IMPLEMENTATION_PLAN.md.
-# FFmpeg is built in-tree. CUDA/NVENC are compiled in; libcudart is not required
-# at process start. Without a GPU the decoder/encoder selectors fall back to CPU.
+# FFmpeg is built in-tree with NVDEC, NVENC and the CUDA filters (nvcc).
+# libcudart is copied into the runtime image so the process starts with no GPU.
+# libcuda, libnvidia-encode and libnvcuvid come from the NVIDIA Container Toolkit
+# when the container is started with a GPU (NVIDIA_DRIVER_CAPABILITIES below).
 ARG CUDA_IMAGE=nvidia/cuda:12.8.2-devel-ubuntu24.04
 
 FROM node:22-bookworm AS webui
@@ -32,6 +34,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN git clone --depth 1 https://github.com/microsoft/vcpkg /opt/vcpkg \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ENV VCPKG_ROOT=/opt/vcpkg
+ENV PATH="/usr/local/cuda/bin:${PATH}"
 
 RUN git init /tmp/mxl \
     && git -C /tmp/mxl remote add origin https://github.com/dmf-mxl/mxl.git \
@@ -79,10 +82,13 @@ RUN git init /tmp/ffmpeg \
         --enable-libx264 --enable-libx265 --enable-libsoxr \
         --enable-openssl \
         --enable-ffnvcodec --enable-nvdec --enable-nvenc \
-        --enable-cuda-llvm \
+        --enable-cuda-nvcc \
+        --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
         --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
         --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
-    && make -j"$(nproc)" && make install && ldconfig
+    && make -j"$(nproc)" && make install \
+    && cp -aL /usr/local/cuda/lib64/libcudart.so* /usr/local/lib/ \
+    && ldconfig
 
 COPY . /src
 COPY --from=webui /web/dist /src/web/dist
@@ -107,6 +113,7 @@ COPY --from=build /usr/local/lib/ /usr/local/lib/
 COPY --from=build /src/build/mxl-srt-gateway /usr/local/bin/mxl-srt-gateway
 COPY --from=build /src/build/mxl-srt-flow-writer /usr/local/bin/mxl-srt-flow-writer
 COPY --from=build /src/build/mxl-srt-flow-verify /usr/local/bin/mxl-srt-flow-verify
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 LABEL io.dmf.mxl.revision="${MXL_REF}"
 LABEL org.opencontainers.image.title="mxl-srt-gateway"
 LABEL org.opencontainers.image.licenses="GPL-2.0-or-later"

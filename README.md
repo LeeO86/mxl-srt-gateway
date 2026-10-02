@@ -70,9 +70,15 @@ exits **75**. SIGTERM exits **143**.
 Health and metrics: `/livez`, `/readyz`, `/statusz`, `/metrics`.
 The UI and REST API are on `/` and `/api/v1/`. Passphrases are write-only.
 
-Without a GPU the process still starts and uses the CPU codecs. With a GPU,
-`auto` tries NVDEC/NVENC and CUDA filters (`bwdif_cuda`, `scale_cuda`) and
-falls back per stream.
+The image is built with NVDEC, NVENC and the CUDA filters (`bwdif_cuda`,
+`yadif_cuda`, `scale_cuda`). `libcudart` is in the image, so the process starts
+on a host with no GPU and stays on the CPU codecs. To use the GPU, run it with
+the NVIDIA Container Toolkit (`docker run --gpus all` or
+`runtimeClassName: nvidia`). The image sets
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` so the toolkit mounts
+`libcuda`, `libnvidia-encode` and `libnvcuvid`. `auto` tries NVDEC, the CUDA
+filters on those frames, and NVENC, and falls back per stream when the device
+or the graph cannot be opened.
 
 ## Layout
 
