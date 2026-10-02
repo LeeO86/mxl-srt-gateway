@@ -1,0 +1,49 @@
+# Loopback demo on a user-defined network.
+# One egress channel sends SRT to the ingest listener in the same process is
+# not possible for two NMOS nodes, so this file runs two gateway containers.
+services:
+  registry:
+    image: rhastie/nmos-cpp:latest-amd64
+    command: ["--domain", "local", "registry"]
+    ports:
+      - "3210:3210"
+      - "3211:3211"
+
+  egress:
+    image: ghcr.io/leeo86/mxl-srt-gateway:latest
+    depends_on: [registry]
+    environment:
+      NMOS_REGISTRY_ADDRESS: registry
+      NMOS_REGISTRY_PORT: "3210"
+      WEB_PORT: "8120"
+      SRTGW_PUBLIC_IP: egress
+      MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
+      MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/egress
+      SRTGW_CONFIG_FILE: /config/egress.json
+    volumes:
+      - mxl:/Volumes/mxl
+      - ./examples:/config:ro
+    ports:
+      - "8120:8120"
+
+  ingest:
+    image: ghcr.io/leeo86/mxl-srt-gateway:latest
+    depends_on: [registry, egress]
+    environment:
+      NMOS_REGISTRY_ADDRESS: registry
+      NMOS_REGISTRY_PORT: "3210"
+      WEB_PORT: "8121"
+      HOST_ID: ingest
+      SRTGW_PUBLIC_IP: ingest
+      MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
+      MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/ingest
+      SRTGW_CONFIG_FILE: /config/ingest.json
+    volumes:
+      - mxl:/Volumes/mxl
+      - ./examples:/config:ro
+    ports:
+      - "8121:8121"
+      - "9000:9000/udp"
+
+volumes:
+  mxl:

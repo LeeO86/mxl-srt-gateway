@@ -1,0 +1,17 @@
+# Host networking for a machine that already has the facility MXL root and
+# an NMOS registry. SRT is UDP and does not traverse an HTTP proxy.
+services:
+  gateway:
+    image: ghcr.io/leeo86/mxl-srt-gateway:latest
+    network_mode: host
+    environment:
+      NMOS_REGISTRY_ADDRESS: ${NMOS_REGISTRY_ADDRESS:-127.0.0.1}
+      NMOS_REGISTRY_PORT: ${NMOS_REGISTRY_PORT:-3210}
+      WEB_PORT: "8120"
+      MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
+      MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/srtgw
+      SRTGW_CONFIG_FILE: /config/gateway.json
+      SRTGW_PUBLIC_IP: ${SRTGW_PUBLIC_IP:-}
+    volumes:
+      - /Volumes/mxl:/Volumes/mxl
+      - /etc/mxl-srt-gateway:/config

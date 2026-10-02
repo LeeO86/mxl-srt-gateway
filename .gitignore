@@ -1,0 +1,8 @@
+build/
+install/
+web/node_modules/
+web/dist/
+*.o
+*.a
+compile_commands.json
+.cache/
