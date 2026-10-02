@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 # Pins are the single source of truth shared with CI and IMPLEMENTATION_PLAN.md.
-# FFmpeg is built in-tree with NVDEC, NVENC and the CUDA filters (nvcc).
-# libcudart is copied into the runtime image so the process starts with no GPU.
+# FFmpeg is built in-tree with NVDEC, NVENC and the CUDA filters.
+# The filters are compiled with Clang's NVPTX backend (--enable-cuda-llvm).
+# FFmpeg marks --enable-cuda-nvcc nonfree, which this GPL image cannot enable.
 # libcuda, libnvidia-encode and libnvcuvid come from the NVIDIA Container Toolkit
 # when the container is started with a GPU (NVIDIA_DRIVER_CAPABILITIES below).
+# Those libraries are dlopened, so the process starts with no GPU.
 ARG CUDA_IMAGE=nvidia/cuda:12.8.2-devel-ubuntu24.04
 
 FROM node:22-bookworm AS webui
@@ -29,12 +31,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libboost-filesystem-dev libcpprest-dev nlohmann-json3-dev \
         libssl-dev libavahi-compat-libdnssd-dev uuid-dev \
         libx264-dev libx265-dev libsoxr-dev \
+        clang \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --depth 1 https://github.com/microsoft/vcpkg /opt/vcpkg \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ENV VCPKG_ROOT=/opt/vcpkg
-ENV PATH="/usr/local/cuda/bin:${PATH}"
 
 RUN git init /tmp/mxl \
     && git -C /tmp/mxl remote add origin https://github.com/dmf-mxl/mxl.git \
@@ -74,7 +76,7 @@ RUN git init /tmp/ffmpeg \
     && git -C /tmp/ffmpeg remote add origin https://github.com/FFmpeg/FFmpeg.git \
     && git -C /tmp/ffmpeg fetch --depth 1 origin "${FFMPEG_REF}" \
     && git -C /tmp/ffmpeg checkout FETCH_HEAD \
-    && cd /tmp/ffmpeg && ./configure \
+    && cd /tmp/ffmpeg && ( ./configure \
         --prefix=/usr/local \
         --enable-gpl --enable-version3 \
         --enable-shared --disable-static \
@@ -82,13 +84,13 @@ RUN git init /tmp/ffmpeg \
         --enable-libx264 --enable-libx265 --enable-libsoxr \
         --enable-openssl \
         --enable-ffnvcodec --enable-nvdec --enable-nvenc \
-        --enable-cuda-nvcc \
-        --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
+        --enable-cuda-llvm \
+        --nvcc=clang \
+        --nvccflags="--cuda-gpu-arch=sm_75 -O2" \
         --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
         --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
-    && make -j"$(nproc)" && make install \
-    && cp -aL /usr/local/cuda/lib64/libcudart.so* /usr/local/lib/ \
-    && ldconfig
+        || { tail -n 150 ffbuild/config.log; exit 1; } ) \
+    && make -j"$(nproc)" && make install && ldconfig
 
 COPY . /src
 COPY --from=webui /web/dist /src/web/dist

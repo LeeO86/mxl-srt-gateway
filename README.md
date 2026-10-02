@@ -71,10 +71,10 @@ Health and metrics: `/livez`, `/readyz`, `/statusz`, `/metrics`.
 The UI and REST API are on `/` and `/api/v1/`. Passphrases are write-only.
 
 The image is built with NVDEC, NVENC and the CUDA filters (`bwdif_cuda`,
-`yadif_cuda`, `scale_cuda`). `libcudart` is in the image, so the process starts
-on a host with no GPU and stays on the CPU codecs. To use the GPU, run it with
-the NVIDIA Container Toolkit (`docker run --gpus all` or
-`runtimeClassName: nvidia`). The image sets
+`yadif_cuda`, `scale_cuda`). Those libraries are loaded when a device is
+opened, so the process starts on a host with no GPU and stays on the CPU
+codecs. To use the GPU, run it with the NVIDIA Container Toolkit
+(`docker run --gpus all` or `runtimeClassName: nvidia`). The image sets
 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` so the toolkit mounts
 `libcuda`, `libnvidia-encode` and `libnvcuvid`. `auto` tries NVDEC, the CUDA
 filters on those frames, and NVENC, and falls back per stream when the device

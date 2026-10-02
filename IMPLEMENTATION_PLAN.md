@@ -24,8 +24,9 @@ FFmpeg configure line used by `docker/Dockerfile`:
   --enable-libx264 --enable-libx265 --enable-libsoxr \
   --enable-openssl \
   --enable-ffnvcodec --enable-nvdec --enable-nvenc \
-  --enable-cuda-nvcc \
-  --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
+  --enable-cuda-llvm \
+  --nvcc=clang \
+  --nvccflags="--cuda-gpu-arch=sm_75 -O2" \
   --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
   --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib"
 ```
@@ -72,17 +73,18 @@ both.
 4. **Frame-rate conversion** is repeat/drop in the synchroniser. There is no
    motion interpolator (out of scope, §13).
 5. **CUDA filters** (`bwdif_cuda`, `yadif_cuda`, `scale_cuda`) are compiled with
-   nvcc, not `--enable-cuda-llvm` (that needs a Clang NVPTX toolchain the CUDA
-   image does not ship, and it failed the container job). PTX targets compute
-   capability 7.5, which covers Turing and later, including the A4000 and L4.
-   `libcudart` is copied into the runtime image so the dynamic linker can start
-   the process with no GPU. `libcuda`, `libnvidia-encode` and `libnvcuvid` are
-   not in the image; the NVIDIA Container Toolkit mounts them when the container
-   is started with a GPU and `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`.
-   On ingest, an NVDEC frame stays on the device when the plan is a CUDA
-   deinterlace or scale and those filters exist. A failed graph or a failed
-   device open downloads that channel to the CPU graph. Egress adapts v210 on
-   the CPU (that packing is not a `scale_cuda` input) and then tries NVENC.
+   Clang's NVPTX backend (`--enable-cuda-llvm`, `--cuda-gpu-arch=sm_75`).
+   FFmpeg 7.1 marks `--enable-cuda-nvcc` nonfree, so that switch is not used:
+   the image stays GPL-2.0-or-later from libx264 and libx265. sm_75 covers
+   Turing and later, including the A4000 and L4. The filters dlopen `libcuda`;
+   `libcudart` is not linked, so the process starts with no GPU. `libcuda`,
+   `libnvidia-encode` and `libnvcuvid` come from the NVIDIA Container Toolkit
+   when the container is started with a GPU and
+   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video`. On ingest, an NVDEC
+   frame stays on the device when the plan is a CUDA deinterlace or scale and
+   those filters exist. A failed graph or a failed device open downloads that
+   channel to the CPU graph. Egress adapts v210 on the CPU (that packing is
+   not a `scale_cuda` input) and then tries NVENC.
 6. **Rendezvous** is implemented (`SRTO_RENDEZVOUS`) but not required by the tests.
 
 ## MXL calls that matter
