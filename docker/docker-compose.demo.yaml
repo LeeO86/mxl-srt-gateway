@@ -16,7 +16,7 @@ services:
       NMOS_REGISTRY_ADDRESS: registry
       NMOS_REGISTRY_PORT: "3210"
       WEB_PORT: "8120"
-      SRTGW_PUBLIC_IP: egress
+      NMOS_HOST_ADDRESS: ${NMOS_HOST_ADDRESS:-}
       MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
       MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/egress
       SRTGW_CONFIG_FILE: /config/egress.json
@@ -34,7 +34,7 @@ services:
       NMOS_REGISTRY_PORT: "3210"
       WEB_PORT: "8121"
       HOST_ID: ingest
-      SRTGW_PUBLIC_IP: ingest
+      NMOS_HOST_ADDRESS: ${NMOS_HOST_ADDRESS:-}
       MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
       MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/ingest
       SRTGW_CONFIG_FILE: /config/ingest.json

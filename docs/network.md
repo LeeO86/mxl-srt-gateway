@@ -10,8 +10,9 @@ The UI shows a ready-to-copy line per channel.
 Internet **listener** channel:
 
 - a public address and UDP port
-- a NAT or firewall rule to the node IP (`SRTGW_PUBLIC_IP`, the pod `status.hostIP`
-  when Kubernetes downward API is used) and the channel's listener port
+- a NAT or firewall rule to `NMOS_HOST_ADDRESS` (the pod IP on the pod network,
+  or the node IP on the host network; `SRTGW_PUBLIC_IP` is the same setting)
+  and the channel's listener port
 - the rule limited to known peer ranges when those ranges are known
 - the gateway already requires AES-256 and a stream-id allow-list for
   `exposure=internet`

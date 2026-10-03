@@ -35,10 +35,11 @@ std::vector<std::string> parts(std::string const& path)
 }
 } // namespace
 
-Api::Api(ConfigStore& store, ChannelManager& channels, std::function<std::string()> nmosSummary)
+Api::Api(ConfigStore& store, ChannelManager& channels, std::function<std::string()> nmosSummary, std::function<bool()> nmosRegistered)
     : store_(store)
     , channels_(channels)
     , nmosSummary_(std::move(nmosSummary))
+    , nmosRegistered_(std::move(nmosRegistered))
 {
     indexHtml_ = "<!doctype html><meta charset=utf-8><title>mxl-srt-gateway</title><body style=\"font-family:sans-serif;background:#111;color:#eee\"><h1>mxl-srt-gateway</h1><p>API is at <a href=\"/api/v1/status\">/api/v1/status</a>.</p></body>";
 }
@@ -65,11 +66,14 @@ HttpResponse Api::handle(HttpRequest const& request) const
         }
         if (request.path == "/readyz")
         {
-            if (!channels_.ready())
+            bool const channelsReady = channels_.ready();
+            bool const registryRequired = !store_.config().nmosRegistryAddress.empty();
+            bool const registered = !registryRequired || (nmosRegistered_ && nmosRegistered_());
+            if (!channelsReady || !registered)
             {
-                return text(503, "{\"ready\":false}\n");
+                return text(503, std::string("{\"ready\":false,\"channels\":") + (channelsReady ? "true" : "false") + ",\"registered\":" + (registered ? "true" : "false") + "}\n");
             }
-            return text(200, "{\"ready\":true}\n");
+            return text(200, "{\"ready\":true,\"registered\":true}\n");
         }
         if (request.path == "/statusz")
         {
@@ -122,11 +126,12 @@ HttpResponse Api::handle(HttpRequest const& request) const
             }
             if (path.size() == 4 && path[2] == "config" && path[3] == "export" && request.method == "GET")
             {
+                bool const secrets = request.query.find("secrets=1") != std::string::npos || request.query.find("secrets=true") != std::string::npos;
                 if (request.query.find("format=env") != std::string::npos)
                 {
                     return text(200, configToEnv(store_.config()), "text/plain; charset=utf-8");
                 }
-                return text(200, configToJson(store_.snapshot(), false));
+                return text(200, configToJson(store_.snapshot(), secrets));
             }
             if (path.size() == 4 && path[2] == "config" && path[3] == "import" && request.method == "POST")
             {

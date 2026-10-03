@@ -118,6 +118,7 @@ COPY --from=build /src/build/mxl-srt-flow-verify /usr/local/bin/mxl-srt-flow-ver
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 LABEL io.dmf.mxl.revision="${MXL_REF}"
 LABEL org.opencontainers.image.title="mxl-srt-gateway"
+LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-srt-gateway"
 LABEL org.opencontainers.image.licenses="GPL-2.0-or-later"
 RUN ldconfig \
     && if ! getent passwd 1000 >/dev/null; then \

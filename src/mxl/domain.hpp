@@ -27,6 +27,11 @@ struct DomainRecord
 
 std::vector<DomainRecord> scanDomains(std::string const& root);
 std::string resolveDomainPath(std::string const& root, std::string const& id);
+// Creates the directory and writes domain_def.json and options.json only when they are absent.
+// An existing domain_def.json with a different id is left untouched and reported in error.
+bool ensureOutputDomain(std::string const& path, std::string const& id, std::int64_t historyNs, std::string* error);
+// Deletes path when its domain_def.json id matches. Refuses an empty path, "/", and a mismatched id.
+bool removeOwnDomain(std::string const& path, std::string const& id);
 
 class MxlDomain
 {

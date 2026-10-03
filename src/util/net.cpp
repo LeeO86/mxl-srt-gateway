@@ -1,13 +1,18 @@
 #include "util/net.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 
 namespace srtgw
 {
@@ -108,6 +113,162 @@ bool ipv4InCidr(std::string_view ip, std::string_view cidr)
     }
     std::uint32_t const mask = bits == 32 ? 0xffffffffU : (0xffffffffU << (32 - bits));
     return (ipValue & mask) == (net & mask);
+}
+
+bool isAnnounceIpv4(std::string const& text)
+{
+    std::uint32_t value = 0;
+    if (!parseIpv4(text, &value))
+    {
+        return false;
+    }
+    unsigned const first = (value >> 24) & 0xff;
+    return value != 0 && first != 127;
+}
+
+bool udpBindAvailable(std::string const& address, int port, std::string* error)
+{
+    int const fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+    {
+        if (error != nullptr)
+        {
+            *error = "socket failed";
+        }
+        return false;
+    }
+    int const yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
+    auto const host = address.empty() ? "0.0.0.0" : address;
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+    {
+        ::close(fd);
+        if (error != nullptr)
+        {
+            *error = "address is not an IPv4 literal";
+        }
+        return false;
+    }
+    bool const ok = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    if (!ok && error != nullptr)
+    {
+        *error = std::strerror(errno);
+    }
+    ::close(fd);
+    return ok;
+}
+
+int httpExchange(std::string const& method, std::string const& host, int port, std::string const& path, int timeoutMs)
+{
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    auto const portText = std::to_string(port);
+    if (::getaddrinfo(host.c_str(), portText.c_str(), &hints, &result) != 0)
+    {
+        return -1;
+    }
+    int fd = -1;
+    for (auto* item = result; item != nullptr; item = item->ai_next)
+    {
+        fd = ::socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+        if (fd < 0)
+        {
+            continue;
+        }
+        int const flags = ::fcntl(fd, F_GETFL, 0);
+        ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int const connected = ::connect(fd, item->ai_addr, item->ai_addrlen);
+        if (connected == 0)
+        {
+            break;
+        }
+        if (errno != EINPROGRESS)
+        {
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        pollfd poller{};
+        poller.fd = fd;
+        poller.events = POLLOUT;
+        if (::poll(&poller, 1, timeoutMs) <= 0)
+        {
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        int soError = 0;
+        socklen_t len = sizeof(soError);
+        ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &len);
+        if (soError != 0)
+        {
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+        break;
+    }
+    ::freeaddrinfo(result);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    ::fcntl(fd, F_SETFL, 0);
+    timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    std::string const request = method + " " + path + " HTTP/1.0\r\nHost: " + host + "\r\nConnection: close\r\n\r\n";
+    if (::send(fd, request.data(), request.size(), MSG_NOSIGNAL) < 0)
+    {
+        ::close(fd);
+        return -1;
+    }
+    std::string response;
+    char buf[512];
+    while (response.find("\r\n") == std::string::npos && response.size() < 2048)
+    {
+        auto const n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+        {
+            break;
+        }
+        response.append(buf, buf + n);
+    }
+    ::close(fd);
+    if (response.compare(0, 5, "HTTP/") != 0)
+    {
+        return -1;
+    }
+    auto const space = response.find(' ');
+    if (space == std::string::npos)
+    {
+        return -1;
+    }
+    try
+    {
+        return std::stoi(response.substr(space + 1));
+    }
+    catch (...)
+    {
+        return -1;
+    }
+}
+
+int httpGetStatus(std::string const& host, int port, std::string const& path, int timeoutMs)
+{
+    return httpExchange("GET", host, port, path, timeoutMs);
+}
+
+int httpDelete(std::string const& host, int port, std::string const& path, int timeoutMs)
+{
+    return httpExchange("DELETE", host, port, path, timeoutMs);
 }
 
 std::uint64_t taiNowNs()

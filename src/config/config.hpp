@@ -99,6 +99,8 @@ struct ChannelConfig
     std::string decoder;
     std::string encoder;
     EgressSettings egress;
+    // Filled from the process host address when a pipeline starts. Not part of the saved channel document.
+    std::string announceAddress;
 };
 
 struct Config
@@ -113,13 +115,22 @@ struct Config
     int srtPortMax = 9099;
     std::string nmosRegistryAddress;
     int nmosRegistryPort = 3210;
+    std::string nmosQueryAddress;
+    int nmosQueryPort = 3211;
     bool nmosDnsSd = false;
     int nmosPort = 3272;
     std::string nmosSeed;
+    std::string nmosLabel;
+    std::string nmosTagsJson;
     int webPort = 8120;
     std::string logLevel = "info";
-    std::string publicIp;
+    // Address announced to NMOS, the UI and remote SRT callers.
+    // NMOS_HOST_ADDRESS, or SRTGW_PUBLIC_IP when that is unset.
+    std::string hostAddress;
     std::int64_t historyDurationNs = 1000000000;
+    std::string stateDir = "/config";
+    int shutdownTimeoutS = 10;
+    bool cleanupOnExit = false;
     std::string configFile;
     std::vector<ChannelConfig> channels;
 };

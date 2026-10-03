@@ -18,9 +18,12 @@ spec:
         app.kubernetes.io/component: gpu
     spec:
       runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        supplementalGroups: [1000]
       containers:
         - name: gateway
-          image: ghcr.io/leeo86/mxl-srt-gateway:latest
+          image: ghcr.io/leeo86/mxl-srt-gateway:1.0.0
           env:
             - name: DECODER
               value: auto
@@ -34,10 +37,16 @@ spec:
               value: /Volumes/mxl
             - name: MXL_OUTPUT_DOMAIN_DIR
               value: /Volumes/mxl/srtgw-gpu
-            - name: SRTGW_PUBLIC_IP
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: STATE_DIR
+              value: /config
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
+            - name: NMOS_HOST_ADDRESS
               valueFrom:
                 fieldRef:
-                  fieldPath: status.hostIP
+                  fieldPath: status.podIP
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -46,6 +55,8 @@ spec:
           volumeMounts:
             - name: mxl
               mountPath: /Volumes/mxl
+            - name: config
+              mountPath: /config
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
@@ -55,3 +66,5 @@ spec:
           hostPath:
             path: /Volumes/mxl
             type: DirectoryOrCreate
+        - name: config
+          emptyDir: {}

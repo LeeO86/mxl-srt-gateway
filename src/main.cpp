@@ -1,5 +1,6 @@
 #include "channel/runtime.hpp"
 #include "config/store.hpp"
+#include "mxl/domain.hpp"
 #include "nmos/node.hpp"
 #include "ops/api.hpp"
 #include "srt/socket.hpp"
@@ -70,7 +71,7 @@ int main()
         {
             log::error("nmos_start_failed", {{"error", ex.what()}});
         }
-        Api api(store, channels, [&nmos] { return nmos.summary(); });
+        Api api(store, channels, [&nmos] { return nmos.summary(); }, [&nmos] { return nmos.registered(); });
 #if defined(SRTGW_HAS_UI)
         api.setIndex(std::string(webui::indexHtml()));
 #endif
@@ -98,10 +99,24 @@ int main()
         events.join();
         int const signal = gSignal.load();
         log::info("stopping", {{"signal", std::to_string(signal)}});
+        auto const budget = std::chrono::seconds(std::max(1, store.config().shutdownTimeoutS));
+        auto const deadline = std::chrono::steady_clock::now() + budget;
         interruptSrt();
-        nmos.stop();
-        server.stop();
         channels.stop();
+        nmos.stop();
+        if (store.config().cleanupOnExit)
+        {
+            removeOwnDomain(store.config().mxlOutputDomainDir, store.config().mxlOutputDomainId);
+        }
+        server.stop();
+        if (std::chrono::steady_clock::now() > deadline)
+        {
+            log::warn("shutdown_timeout", {{"seconds", std::to_string(store.config().shutdownTimeoutS)}});
+        }
+        if (signal == SIGTERM)
+        {
+            return 143;
+        }
         return signal == 0 ? 0 : 128 + signal;
     }
     catch (ConfigError const& ex)

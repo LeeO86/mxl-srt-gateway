@@ -1,4 +1,5 @@
 #include "config/config.hpp"
+#include "mxl/domain.hpp"
 #include "media/adapt.hpp"
 #include "media/format.hpp"
 #include "media/framesync.hpp"
@@ -13,6 +14,8 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <map>
 
 using namespace srtgw;
@@ -48,6 +51,68 @@ TEST_CASE("config environment overrides the file and defaults")
     CHECK(loaded.config.srtPortMin == 9000);
     CHECK(loaded.config.srtPortMax == 9099);
     CHECK(isUuid(loaded.config.mxlOutputDomainId));
+}
+
+TEST_CASE("platform settings keep aliases and reject bad announce addresses")
+{
+    auto const host = loadFromSources({}, "", {{"NMOS_HOST_ADDRESS", "10.1.2.3"}, {"SRTGW_PUBLIC_IP", "10.9.9.9"}});
+    CHECK(host.config.hostAddress == "10.1.2.3");
+    auto const alias = loadFromSources({}, "", {{"SRTGW_PUBLIC_IP", "10.4.5.6"}});
+    CHECK(alias.config.hostAddress == "10.4.5.6");
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"NMOS_HOST_ADDRESS", "srtgw.example"}}), ConfigError);
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"SRTGW_PUBLIC_IP", "127.0.0.1"}}), ConfigError);
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"NMOS_HOST_ADDRESS", "0.0.0.0"}}), ConfigError);
+
+    auto const ms = loadFromSources({}, "", {{"MXL_HISTORY_DURATION_MS", "2500"}, {"SRTGW_HISTORY_DURATION_NS", "5"}});
+    CHECK(ms.config.historyDurationNs == 2500LL * 1000000LL);
+    auto const ns = loadFromSources({}, "", {{"SRTGW_HISTORY_DURATION_NS", "2000000000"}});
+    CHECK(ns.config.historyDurationNs == 2000000000LL);
+
+    auto const query = loadFromSources({}, "", {{"NMOS_REGISTRY_PORT", "4000"}});
+    CHECK(query.config.nmosQueryPort == 4001);
+    CHECK(query.config.nmosQueryAddress.empty());
+    auto const querySet = loadFromSources({}, "", {{"NMOS_REGISTRY_ADDRESS", "10.0.0.8"}, {"NMOS_QUERY_ADDRESS", "10.0.0.9"}, {"NMOS_QUERY_PORT", "4002"}});
+    CHECK(querySet.config.nmosQueryAddress == "10.0.0.9");
+    CHECK(querySet.config.nmosQueryPort == 4002);
+
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"NMOS_TAGS", "[1]"}}), ConfigError);
+    auto const tags = loadFromSources({}, "", {{"NMOS_TAGS", "{\"urn:x-srf:production\":[\"sport-sa\"],\"urn:x-srf:function\":[\"srt1\"]}"}});
+    CHECK(tags.config.nmosTagsJson.find("sport-sa") != std::string::npos);
+    CHECK(tags.config.cleanupOnExit == false);
+    CHECK(loadFromSources({}, "", {{"MXL_CLEANUP_ON_EXIT", "true"}}).config.cleanupOnExit);
+    CHECK(loadFromSources({}, "", {}).config.stateDir == "/config");
+    CHECK(loadFromSources({}, "", {}).config.shutdownTimeoutS == 10);
+    CHECK(loadFromSources({}, "", {}).config.nmosDnsSd == false);
+
+    auto const a = makeNmosIds("sport-sa-srtgw");
+    auto const b = makeNmosIds("sport-sa-srtgw");
+    CHECK(a.node == b.node);
+    CHECK(a.domain == b.domain);
+    CHECK(a.node != makeNmosIds("other").node);
+}
+
+TEST_CASE("output domain files are not overwritten and cleanup stays inside the domain")
+{
+    auto const root = std::filesystem::temp_directory_path() / "srtgw-domain-test";
+    std::filesystem::remove_all(root);
+    auto const path = root / "own";
+    std::string error;
+    CHECK(ensureOutputDomain(path.string(), "11111111-1111-4111-8111-111111111111", 1000000000, &error));
+    auto const before = std::filesystem::file_size(path / "domain_def.json");
+    CHECK(ensureOutputDomain(path.string(), "11111111-1111-4111-8111-111111111111", 1000000000, &error));
+    CHECK(std::filesystem::file_size(path / "domain_def.json") == before);
+    CHECK_FALSE(ensureOutputDomain(path.string(), "22222222-2222-4222-8222-222222222222", 1000000000, &error));
+    CHECK(error.find("refusing") != std::string::npos);
+    std::ifstream in(path / "domain_def.json");
+    std::string text;
+    std::getline(in, text);
+    CHECK(text.find("11111111-1111-4111-8111-111111111111") != std::string::npos);
+    CHECK_FALSE(removeOwnDomain(path.string(), "22222222-2222-4222-8222-222222222222"));
+    CHECK(std::filesystem::exists(path / "domain_def.json"));
+    CHECK(removeOwnDomain(path.string(), "11111111-1111-4111-8111-111111111111"));
+    CHECK_FALSE(std::filesystem::exists(path));
+    CHECK_FALSE(removeOwnDomain("/", "11111111-1111-4111-8111-111111111111"));
+    std::filesystem::remove_all(root);
 }
 
 TEST_CASE("a matrix patch keeps the channel label and the per-tap gains")

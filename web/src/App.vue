@@ -433,7 +433,7 @@ async function saveMatrix() {
 
 async function saveGlobals() {
   const body = {};
-  for (const key of ["LOG_LEVEL", "DECODER", "ENCODER", "SRTGW_PUBLIC_IP", "NMOS_REGISTRY_ADDRESS", "WEB_PORT", "NMOS_PORT", "SRT_PORT_RANGE"]) {
+  for (const key of ["LOG_LEVEL", "DECODER", "ENCODER", "NMOS_HOST_ADDRESS", "SRTGW_PUBLIC_IP", "NMOS_REGISTRY_ADDRESS", "NMOS_LABEL", "WEB_PORT", "NMOS_PORT", "SRT_PORT_RANGE"]) {
     if (config.value[key] !== undefined) body[key] = String(config.value[key]);
   }
   const response = await fetch("/api/v1/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

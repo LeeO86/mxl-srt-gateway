@@ -54,21 +54,58 @@ It is labelled `io.dmf.mxl.revision`.
 ## Run
 
 Environment overrides the JSON file (`SRTGW_CONFIG_FILE`), which overrides the
-defaults. Invalid configuration exits **78**. A domain that cannot be created
-exits **75**. SIGTERM exits **143**.
+defaults. Unknown environment variables are ignored. Invalid configuration
+exits **78**. A port that cannot be bound, or a domain that cannot be created,
+exits **75**. SIGTERM exits **143**. A clean run that is stopped another way
+exits **0**.
 
-| Key | Default |
-| --- | --- |
-| `WEB_PORT` | `8120` |
-| `NMOS_PORT` | `3272` |
-| `SRT_PORT_RANGE` | `9000-9099` |
-| `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` |
-| `MXL_OUTPUT_DOMAIN_DIR` | `/Volumes/mxl/srtgw-<seed>` |
-| `DECODER` / `ENCODER` | `auto` (`nvdec`/`nvenc` or `cpu`) |
-| `SRTGW_PUBLIC_IP` | address shown to remote callers |
+State the process writes (the config file when `SRTGW_CONFIG_FILE` points
+there, and `routes.json` for IS-05 activations) lives under `STATE_DIR`
+(default `/config`). Mount that directory if it must survive a restart.
+Passphrases are stored in the config file in plain text, because that file is
+the secret; they are never logged and are omitted from the API unless
+`GET /api/v1/config/export?secrets=1`.
 
-Health and metrics: `/livez`, `/readyz`, `/statusz`, `/metrics`.
-The UI and REST API are on `/` and `/api/v1/`. Passphrases are write-only.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `WEB_PORT` | `8120` | UI, REST, `/livez`, `/readyz`, `/metrics` |
+| `NMOS_PORT` | `3272` | IS-04/IS-05 node API. WebSocket is `NMOS_PORT`+1 |
+| `SRT_PORT_RANGE` | `9000-9099` | listener ports this process may bind |
+| `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | parent of every domain directory, mirrors included |
+| `MXL_OUTPUT_DOMAIN_DIR` | `/Volumes/mxl/srtgw-<seed>` | this function's domain, created if missing |
+| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 from `NMOS_SEED` | stable domain id. An existing `domain_def.json` with a different id is not overwritten |
+| `MXL_HISTORY_DURATION_MS` | `1000` | `history_duration` written when this process creates `options.json`. `SRTGW_HISTORY_DURATION_NS` is the old name |
+| `MXL_CLEANUP_ON_EXIT` | `false` | on SIGTERM, delete only this function's output domain directory |
+| `STATE_DIR` | `/config` | writable state directory |
+| `SHUTDOWN_TIMEOUT_S` | `10` | bound on SIGTERM work |
+| `DECODER` / `ENCODER` | `auto` | `auto`, `nvdec`/`nvenc`, or `cpu` |
+| `NMOS_SEED` | `HOST_ID-srtgw` | UUIDv5 seed for the node, device, flows, senders, receivers and domain id |
+| `NMOS_LABEL` | node label is `HOST_ID`, device label is `MXL SRT Gateway` | node label and device label |
+| `NMOS_TAGS` | empty | JSON object of tag name to array of strings, copied onto the node and device |
+| `NMOS_REGISTRY_ADDRESS` / `NMOS_REGISTRY_PORT` | empty / `3210` | Registration API. Empty address means the node does not register |
+| `NMOS_QUERY_ADDRESS` | the registry address | Query API host used by `/readyz` |
+| `NMOS_QUERY_PORT` | registry port + 1 | Query API port. The registry's Query WebSocket is that port + 1 (`P+2` when registration is `P`) |
+| `NMOS_DNS_SD` | `false` | `false` disables DNS-SD browse and mDNS advertisement (`pri` and `highest_pri` are max int). No Avahi daemon is required |
+| `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | address announced on the node, in IS-05, and in the UI request line. Must be an IPv4 literal, not `0.0.0.0`, `127.0.0.1` or a hostname. `SRTGW_PUBLIC_IP` is the same setting |
+| `HOST_ID` | hostname | identity used in the default seed. It is not announced as an address |
+| `LOG_LEVEL` | `info` | |
+| `SRTGW_CONFIG_FILE` | unset | JSON file of the settings above plus `channels` |
+
+`/readyz` is 200 only when channels are up and, if `NMOS_REGISTRY_ADDRESS` is
+set, the Query API lists this node. `/livez` is 200 while the process is up.
+`/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix.
+
+REST, all under `/api/v1`: `GET /status`, `GET /nmos`, `GET|PUT /config`,
+`GET /config/export` (`?format=env`, `?secrets=1`), `POST /config/import`,
+`GET|POST /channels`, `GET|PUT|DELETE /channels/:id`, `PUT /channels/:id/matrix`,
+`POST /channels/:id/route`, `GET /channels/:id/status`, `GET /channels/:id/thumbnail`,
+WebSocket `/api/v1/events`.
+
+On the platform, set `NMOS_HOST_ADDRESS` to the pod IP (or the node IP on a
+host network), `NMOS_SEED` to `<production>-srtgw`, `NMOS_LABEL` and
+`NMOS_TAGS`, `MXL_CLEANUP_ON_EXIT=true`, and mount `/Volumes/mxl` plus a
+writable `/config`. `deploy/mxl-srt-gateway.yaml` is that shape. Two instances
+on one node need distinct `WEB_PORT`, `NMOS_PORT` and `SRT_PORT_RANGE`.
 
 The image is built with NVDEC, NVENC and the CUDA filters (`bwdif_cuda`,
 `yadif_cuda`, `scale_cuda`). Those libraries are loaded when a device is

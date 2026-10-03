@@ -1,5 +1,6 @@
 #include "nmos/node.hpp"
 
+#include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 #include "util/net.hpp"
 
@@ -84,6 +85,21 @@ bool NmosNode::running() const
     return impl_->running.load();
 }
 
+bool NmosNode::registered() const
+{
+    auto const config = impl_->config;
+    if (config.nmosRegistryAddress.empty())
+    {
+        return true;
+    }
+#if !SRTGW_WITH_NMOS
+    return false;
+#else
+    auto const path = "/x-nmos/query/v1.3/nodes/" + impl_->ids.node;
+    return httpGetStatus(config.nmosQueryAddress, config.nmosQueryPort, path, 800) == 200;
+#endif
+}
+
 std::string NmosNode::summary() const
 {
     auto const config = impl_->store.config();
@@ -152,6 +168,41 @@ void tagGroup(nmos::resource& resource, std::string const& group, std::string co
     }
     web::json::push_back(resource.data[U("tags")][U("urn:x-nmos:tag:grouphint/v1.0")], nmos::make_group_hint({us(group), us(role)}));
 }
+
+void applyPlatformTags(nmos::resource& resource, std::string const& tagsJson)
+{
+    if (tagsJson.empty())
+    {
+        return;
+    }
+    std::string error;
+    auto const parsed = json::parse(tagsJson, &error);
+    if (!error.empty() || !parsed.is<picojson::object>())
+    {
+        return;
+    }
+    if (!resource.data.has_field(nmos::fields::tags))
+    {
+        resource.data[U("tags")] = web::json::value::object();
+    }
+    for (auto const& item : parsed.get<picojson::object>())
+    {
+        if (!item.second.is<picojson::array>())
+        {
+            continue;
+        }
+        web::json::value values = web::json::value::array();
+        for (auto const& entry : item.second.get<picojson::array>())
+        {
+            if (entry.is<std::string>())
+            {
+                web::json::push_back(values, web::json::value::string(us(entry.get<std::string>())));
+            }
+        }
+        resource.data[U("tags")][us(item.first)] = values;
+    }
+}
+
 } // namespace
 
 void NmosNode::start()
@@ -167,25 +218,32 @@ void NmosNode::start()
             nmos::node_model nodeModel;
             impl_->model = &nodeModel;
             web::json::value settings = web::json::value::object();
+            auto const nodeLabel = impl_->config.nmosLabel.empty() ? impl_->config.hostId : impl_->config.nmosLabel;
             settings[U("http_port")] = impl_->config.nmosPort;
-            settings[U("label")] = web::json::value::string(us(impl_->config.hostId));
+            settings[U("label")] = web::json::value::string(us(nodeLabel));
             settings[U("description")] = web::json::value::string(U("mxl-srt-gateway"));
             settings[U("seed_id")] = web::json::value::string(us(impl_->ids.node));
             settings[U("service_name_prefix")] = web::json::value::string(U("mxl-srt-gateway"));
             settings[U("logging_level")] = 20;
             settings[U("control_protocol_ws_port")] = -1;
-            auto const host = impl_->config.publicIp.empty() ? primaryIpv4() : impl_->config.publicIp;
+            settings[U("registration_request_max")] = 2;
+            settings[U("registration_heartbeat_max")] = 2;
+            auto const host = impl_->config.hostAddress.empty() ? primaryIpv4() : impl_->config.hostAddress;
             settings[U("host_address")] = web::json::value::string(us(host));
+            auto hosts = web::json::value::array();
+            hosts[0] = web::json::value::string(us(host));
+            settings[U("host_addresses")] = hosts;
             if (!impl_->config.nmosDnsSd)
             {
                 settings[U("pri")] = std::numeric_limits<int>::max();
                 settings[U("highest_pri")] = std::numeric_limits<int>::max();
+                settings[U("authorization_highest_pri")] = std::numeric_limits<int>::max();
             }
             if (!impl_->config.nmosRegistryAddress.empty())
             {
                 settings[U("registry_address")] = web::json::value::string(us(impl_->config.nmosRegistryAddress));
                 settings[U("registration_port")] = impl_->config.nmosRegistryPort;
-                settings[U("query_port")] = impl_->config.nmosRegistryPort + 1;
+                settings[U("query_port")] = impl_->config.nmosQueryPort;
             }
             nodeModel.settings = settings;
             nmos::insert_node_default_settings(nodeModel.settings);
@@ -257,12 +315,16 @@ void NmosNode::start()
                 auto lock = nodeModel.write_lock();
                 auto const clocks = web::json::value_of({nmos::make_internal_clock(nmos::clock_names::clk0)});
                 auto const interfaces = nmos::experimental::node_interfaces(nmos::get_host_interfaces(nodeModel.settings));
+                auto const nodeLabel = impl_->config.nmosLabel.empty() ? impl_->config.hostId : impl_->config.nmosLabel;
+                auto const deviceLabel = impl_->config.nmosLabel.empty() ? std::string("MXL SRT Gateway") : impl_->config.nmosLabel;
                 auto node = nmos::make_node(us(impl_->ids.node), clocks, nmos::make_node_interfaces(interfaces), nodeModel.settings);
-                node.data[U("label")] = web::json::value::string(us(impl_->config.hostId));
+                node.data[U("label")] = web::json::value::string(us(nodeLabel));
                 node.data[U("description")] = web::json::value::string(U("MXL SRT Gateway"));
+                applyPlatformTags(node, impl_->config.nmosTagsJson);
                 nmos::insert_resource(nodeModel.node_resources, std::move(node));
                 auto device = nmos::make_device(us(impl_->ids.device), us(impl_->ids.node), {}, {}, nodeModel.settings);
-                device.data[U("label")] = web::json::value::string(U("MXL SRT Gateway"));
+                device.data[U("label")] = web::json::value::string(us(deviceLabel));
+                applyPlatformTags(device, impl_->config.nmosTagsJson);
                 nmos::insert_resource(nodeModel.node_resources, std::move(device));
 
                 auto ensure = [&](nmos::resources& resources, nmos::resource&& resource) {
@@ -384,9 +446,19 @@ void NmosNode::start()
                 }
             });
             nmos::server_guard guard(server);
+            while (!impl_->running.load() && impl_->error.empty())
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
             while (impl_->running.load())
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+            if (!impl_->config.nmosRegistryAddress.empty())
+            {
+                auto const path = "/x-nmos/registration/v1.3/resource/node/" + impl_->ids.node;
+                auto const status = httpDelete(impl_->config.nmosRegistryAddress, impl_->config.nmosRegistryPort, path, 2000);
+                log::info("nmos_deregister", {{"status", std::to_string(status)}});
             }
             {
                 auto lock = nodeModel.write_lock();

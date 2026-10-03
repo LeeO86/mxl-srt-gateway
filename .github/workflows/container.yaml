@@ -40,13 +40,15 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=nightly-dev,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
-            type=sha,prefix=git-
+            type=raw,value=nightly-dev,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=git-,format=short
           flavor: |
-            latest=${{ startsWith(github.ref, 'refs/tags/') }}
+            latest=false
           labels: |
             org.opencontainers.image.title=mxl-srt-gateway
             org.opencontainers.image.description=SRT contribution gateway for MXL
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=GPL-2.0-or-later
             io.dmf.mxl.revision=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 

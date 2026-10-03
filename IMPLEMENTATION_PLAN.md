@@ -123,3 +123,22 @@ run. `tests/nmos/amwa.sh` is the AMWA suite runner, not part of default CI.
 
 Hardware numbers for A4000 and L4 are recorded by the procedure in
 `docs/hardware.md` rather than invented here.
+
+## Platform guideline G1–G14
+
+| Item | Status | Evidence |
+| --- | --- | --- |
+| G1 Configuration | met | Env, then file, then defaults in `src/config/config.cpp`. Unknown env names are not read (`environmentValues`). Invalid values throw `ConfigError` and `src/main.cpp` exits 78. Settings table in `README.md`. State is `STATE_DIR` (default `/config`). Passphrases are redacted in `src/util/logging.cpp` and omitted from export unless `secrets=1`. |
+| G2 MXL domains | met | Scan path and output dir/id in `src/config/config.cpp`. `ensureOutputDomain` (`src/mxl/domain_files.cpp`) creates a missing domain and refuses to overwrite a different `domain_def.json`. `options.json` is written only when absent. `MXL_HISTORY_DURATION_MS` sets history. |
+| G3 NMOS identity | met | `makeNmosIds` (`src/nmos/ids.cpp`) is UUIDv5 from `NMOS_SEED`, including the domain id. `NMOS_LABEL` and `NMOS_TAGS` are applied in `src/nmos/node.cpp`. Group hints stay. |
+| G4 Registry, no DNS-SD | met | `NMOS_QUERY_ADDRESS` defaults to the registry address and `NMOS_QUERY_PORT` to registration port + 1. `NMOS_DNS_SD` defaults false and sets `pri`, `highest_pri` and `authorization_highest_pri` to max int (`src/nmos/node.cpp`). The Avahi client library stays linked; no daemon is required while DNS-SD is off. |
+| G5 Announce IP addresses | met | `NMOS_HOST_ADDRESS` (alias `SRTGW_PUBLIC_IP`) must be a non-loopback IPv4 when set. It is the NMOS `host_address` / `host_addresses` and the UI request line (`announceAddress`). `HOST_ID` is only the default seed. |
+| G6 Ports | met | `WEB_PORT`, `NMOS_PORT` (WebSocket + 1) and per-channel SRT ports. A listener UDP bind failure throws and `main` exits 75. Web bind failure returns 75. |
+| G7 Health and metrics | met | `/livez` is process liveness. `/readyz` (`src/ops/api.cpp`) is 200 only when channels are up and, with a registry, `NmosNode::registered` sees the node on the Query API. `/metrics` uses the `mxl_srt_gateway_` prefix. |
+| G8 Clean shutdown | met | SIGTERM stops channels, `httpDelete`s the node, optionally `removeOwnDomain`, and exits 143 (`src/main.cpp`). `SHUTDOWN_TIMEOUT_S` defaults to 10. `MXL_CLEANUP_ON_EXIT` defaults false. |
+| G9 IS-05 | met | Senders publish active `mxl_domain_id` and `mxl_flow_id`. Activation with `master_enable` false clears the route. Active routes are stored in `STATE_DIR/routes.json`. |
+| G10 Config export and import | met | `GET /api/v1/config/export` and `POST /api/v1/config/import`. Secrets are omitted unless `secrets=1`. An omitted passphrase on import keeps the stored one. |
+| G11 Image and CI | met | `.github/workflows/container.yaml` pushes `git-<sha7>` and `nightly-dev` on `main`, and `X.Y.Z`, `X.Y`, `X` on a `vX.Y.Z` tag. `latest` is not published. OCI labels include source, revision, licenses and `io.dmf.mxl.revision`. The runtime user is uid 1000. |
+| G12 Kubernetes example | met | `deploy/mxl-srt-gateway.yaml`: pod network, standard env, `/livez` and `/readyz`, grace period 30, MXL hostPath, writable `/config`, `supplementalGroups: [1000]`, no `hostIPC`. |
+| G13 Documentation | met | `README.md`, `CHANGELOG.md` 1.0.0, `SPECIFICATION.md` settings table. |
+| G14 Tests | met | `tests/unit/test_logic.cpp` covers the new settings and domain files. `tests/integration/shutdown.sh` covers ready, SIGTERM, exit 143, node DELETE and domain removal. |

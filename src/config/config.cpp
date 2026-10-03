@@ -313,13 +313,14 @@ ChannelConfig defaultEgress(std::string const& id)
 std::vector<std::string> globalKeys()
 {
     return {"HOST_ID", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR", "MXL_OUTPUT_DOMAIN_ID", "DECODER", "ENCODER", "SRT_PORT_RANGE",
-        "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED", "WEB_PORT", "LOG_LEVEL", "SRTGW_PUBLIC_IP",
-        "SRTGW_HISTORY_DURATION_NS"};
+        "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_QUERY_ADDRESS", "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED",
+        "NMOS_LABEL", "NMOS_TAGS", "WEB_PORT", "LOG_LEVEL", "NMOS_HOST_ADDRESS", "SRTGW_PUBLIC_IP", "MXL_HISTORY_DURATION_MS",
+        "SRTGW_HISTORY_DURATION_NS", "STATE_DIR", "SHUTDOWN_TIMEOUT_S", "MXL_CLEANUP_ON_EXIT"};
 }
 
 bool isRestartKey(std::string const& key)
 {
-    return key != "LOG_LEVEL" && key != "SRTGW_PUBLIC_IP";
+    return key != "LOG_LEVEL";
 }
 
 AccessPolicy policyFor(SrtEndpointConfig const& endpoint)
@@ -356,6 +357,18 @@ void validateConfig(Config const& config)
     if (config.webPort == config.nmosPort || config.webPort == config.nmosPort + 1)
     {
         error += "WEB_PORT collides with the NMOS node port; ";
+    }
+    if (config.nmosQueryPort < 1 || config.nmosQueryPort > 65535)
+    {
+        error += "NMOS_QUERY_PORT is invalid; ";
+    }
+    if (config.shutdownTimeoutS < 1 || config.shutdownTimeoutS > 600)
+    {
+        error += "SHUTDOWN_TIMEOUT_S is invalid; ";
+    }
+    if (config.stateDir.empty() || config.stateDir.front() != '/')
+    {
+        error += "STATE_DIR must be an absolute path; ";
     }
     if (!config.mxlOutputDomainId.empty() && !isUuid(config.mxlOutputDomainId))
     {
@@ -534,25 +547,106 @@ LoadedConfig loadFromSources(std::map<std::string, std::string> const& fileValue
     loaded.config.encoder = lower(take("ENCODER", "auto"));
     loaded.config.nmosRegistryAddress = take("NMOS_REGISTRY_ADDRESS", "");
     loaded.config.nmosRegistryPort = envInt({{"NMOS_REGISTRY_PORT", take("NMOS_REGISTRY_PORT", "3210")}}, "NMOS_REGISTRY_PORT", 3210, &error);
+    loaded.config.nmosQueryAddress = take("NMOS_QUERY_ADDRESS", "");
+    if (loaded.config.nmosQueryAddress.empty())
+    {
+        loaded.config.nmosQueryAddress = loaded.config.nmosRegistryAddress;
+        loaded.origin["NMOS_QUERY_ADDRESS"] = ValueOrigin::Default;
+    }
+    auto const querySet = envValues.count("NMOS_QUERY_PORT") != 0 || fileValues.count("NMOS_QUERY_PORT") != 0;
+    if (querySet)
+    {
+        loaded.config.nmosQueryPort = envInt({{"NMOS_QUERY_PORT", take("NMOS_QUERY_PORT", "0")}}, "NMOS_QUERY_PORT", 0, &error);
+    }
+    else
+    {
+        loaded.config.nmosQueryPort = loaded.config.nmosRegistryPort + 1;
+        loaded.origin["NMOS_QUERY_PORT"] = ValueOrigin::Default;
+    }
     loaded.config.nmosDnsSd = truthy(take("NMOS_DNS_SD", "false"));
     loaded.config.nmosPort = envInt({{"NMOS_PORT", take("NMOS_PORT", "3272")}}, "NMOS_PORT", 3272, &error);
     loaded.config.nmosSeed = take("NMOS_SEED", loaded.config.hostId + "-srtgw");
+    loaded.config.nmosLabel = take("NMOS_LABEL", "");
+    loaded.config.nmosTagsJson = take("NMOS_TAGS", "");
+    if (!loaded.config.nmosTagsJson.empty())
+    {
+        std::string tagsError;
+        auto const tags = json::parse(loaded.config.nmosTagsJson, &tagsError);
+        if (!tagsError.empty() || !tags.is<picojson::object>())
+        {
+            error += "NMOS_TAGS must be a JSON object of string arrays; ";
+        }
+        else
+        {
+            for (auto const& item : tags.get<picojson::object>())
+            {
+                if (!item.second.is<picojson::array>())
+                {
+                    error += "NMOS_TAGS value for " + item.first + " must be an array; ";
+                    continue;
+                }
+                for (auto const& entry : item.second.get<picojson::array>())
+                {
+                    if (!entry.is<std::string>())
+                    {
+                        error += "NMOS_TAGS value for " + item.first + " must be strings; ";
+                    }
+                }
+            }
+        }
+    }
     loaded.config.webPort = envInt({{"WEB_PORT", take("WEB_PORT", "8120")}}, "WEB_PORT", 8120, &error);
     loaded.config.logLevel = lower(take("LOG_LEVEL", "info"));
-    loaded.config.publicIp = take("SRTGW_PUBLIC_IP", "");
-    if (loaded.config.publicIp.empty())
+    loaded.config.stateDir = take("STATE_DIR", "/config");
+    loaded.config.shutdownTimeoutS = envInt({{"SHUTDOWN_TIMEOUT_S", take("SHUTDOWN_TIMEOUT_S", "10")}}, "SHUTDOWN_TIMEOUT_S", 10, &error);
+    loaded.config.cleanupOnExit = truthy(take("MXL_CLEANUP_ON_EXIT", "false"));
+    auto const hostSet = envValues.count("NMOS_HOST_ADDRESS") != 0 || fileValues.count("NMOS_HOST_ADDRESS") != 0;
+    auto const aliasSet = envValues.count("SRTGW_PUBLIC_IP") != 0 || fileValues.count("SRTGW_PUBLIC_IP") != 0;
+    if (hostSet)
     {
-        loaded.config.publicIp = primaryIpv4();
+        loaded.config.hostAddress = take("NMOS_HOST_ADDRESS", "");
+    }
+    else if (aliasSet)
+    {
+        loaded.config.hostAddress = take("SRTGW_PUBLIC_IP", "");
+        loaded.origin["NMOS_HOST_ADDRESS"] = loaded.origin["SRTGW_PUBLIC_IP"];
+    }
+    else
+    {
+        loaded.config.hostAddress = primaryIpv4();
+        loaded.origin["NMOS_HOST_ADDRESS"] = ValueOrigin::Default;
         loaded.origin["SRTGW_PUBLIC_IP"] = ValueOrigin::Default;
     }
-    auto const history = take("SRTGW_HISTORY_DURATION_NS", "1000000000");
+    if ((hostSet || aliasSet) && !isAnnounceIpv4(loaded.config.hostAddress))
+    {
+        error += "NMOS_HOST_ADDRESS must be a non-loopback IPv4 address (SRTGW_PUBLIC_IP is the same setting); ";
+    }
+    else if (!hostSet && !aliasSet && !isAnnounceIpv4(loaded.config.hostAddress))
+    {
+        log::warn("announce_address_loopback", {{"address", loaded.config.hostAddress}, {"detail", "set NMOS_HOST_ADDRESS to the pod or node IP"}});
+    }
+    auto const historyMsSet = envValues.count("MXL_HISTORY_DURATION_MS") != 0 || fileValues.count("MXL_HISTORY_DURATION_MS") != 0;
+    auto const historyNsSet = envValues.count("SRTGW_HISTORY_DURATION_NS") != 0 || fileValues.count("SRTGW_HISTORY_DURATION_NS") != 0;
     try
     {
-        loaded.config.historyDurationNs = std::stoll(history);
+        if (historyMsSet)
+        {
+            loaded.config.historyDurationNs = std::stoll(take("MXL_HISTORY_DURATION_MS", "1000")) * 1000000LL;
+        }
+        else if (historyNsSet)
+        {
+            loaded.config.historyDurationNs = std::stoll(take("SRTGW_HISTORY_DURATION_NS", "1000000000"));
+            loaded.origin["MXL_HISTORY_DURATION_MS"] = loaded.origin["SRTGW_HISTORY_DURATION_NS"];
+        }
+        else
+        {
+            loaded.config.historyDurationNs = 1000000000;
+            loaded.origin["MXL_HISTORY_DURATION_MS"] = ValueOrigin::Default;
+        }
     }
     catch (...)
     {
-        error += "SRTGW_HISTORY_DURATION_NS is not an integer; ";
+        error += "MXL_HISTORY_DURATION_MS / SRTGW_HISTORY_DURATION_NS is not an integer; ";
     }
     auto const range = take("SRT_PORT_RANGE", "9000-9099");
     parsePortRange(range, &loaded.config.srtPortMin, &loaded.config.srtPortMax, &error);
@@ -613,7 +707,10 @@ std::map<std::string, std::string> environmentValues()
     {
         if (char const* value = std::getenv(key.c_str()))
         {
-            values[key] = value;
+            if (value[0] != '\0')
+            {
+                values[key] = value;
+            }
         }
     }
     if (char const* file = std::getenv("SRTGW_CONFIG_FILE"))
@@ -644,7 +741,16 @@ void readConfigFile(std::string const& path, std::map<std::string, std::string>*
     }
     for (auto const& key : globalKeys())
     {
-        if (json::has(root, key))
+        if (!json::has(root, key))
+        {
+            continue;
+        }
+        auto const value = json::field(root, key);
+        if (value && (value->is<picojson::object>() || value->is<picojson::array>()))
+        {
+            (*globals)[key] = value->serialize();
+        }
+        else
         {
             (*globals)[key] = json::fieldString(root, key, "");
         }
@@ -874,13 +980,22 @@ std::string configToJson(LoadedConfig const& loaded, bool includeSecrets)
     add("SRT_PORT_RANGE", std::to_string(cfg.srtPortMin) + "-" + std::to_string(cfg.srtPortMax));
     add("NMOS_REGISTRY_ADDRESS", cfg.nmosRegistryAddress);
     obj["NMOS_REGISTRY_PORT"] = picojson::value(static_cast<double>(cfg.nmosRegistryPort));
+    add("NMOS_QUERY_ADDRESS", cfg.nmosQueryAddress);
+    obj["NMOS_QUERY_PORT"] = picojson::value(static_cast<double>(cfg.nmosQueryPort));
     obj["NMOS_DNS_SD"] = picojson::value(cfg.nmosDnsSd);
     obj["NMOS_PORT"] = picojson::value(static_cast<double>(cfg.nmosPort));
     add("NMOS_SEED", cfg.nmosSeed);
+    add("NMOS_LABEL", cfg.nmosLabel);
+    add("NMOS_TAGS", cfg.nmosTagsJson);
     obj["WEB_PORT"] = picojson::value(static_cast<double>(cfg.webPort));
     add("LOG_LEVEL", cfg.logLevel);
-    add("SRTGW_PUBLIC_IP", cfg.publicIp);
+    add("NMOS_HOST_ADDRESS", cfg.hostAddress);
+    add("SRTGW_PUBLIC_IP", cfg.hostAddress);
+    obj["MXL_HISTORY_DURATION_MS"] = picojson::value(static_cast<double>(cfg.historyDurationNs / 1000000));
     obj["SRTGW_HISTORY_DURATION_NS"] = picojson::value(static_cast<double>(cfg.historyDurationNs));
+    add("STATE_DIR", cfg.stateDir);
+    obj["SHUTDOWN_TIMEOUT_S"] = picojson::value(static_cast<double>(cfg.shutdownTimeoutS));
+    obj["MXL_CLEANUP_ON_EXIT"] = picojson::value(cfg.cleanupOnExit);
     picojson::object origin;
     for (auto const& item : loaded.origin)
     {
@@ -919,12 +1034,20 @@ std::string configToEnv(Config const& config)
     out << "SRT_PORT_RANGE=" << config.srtPortMin << "-" << config.srtPortMax << "\n";
     out << "NMOS_REGISTRY_ADDRESS=" << config.nmosRegistryAddress << "\n";
     out << "NMOS_REGISTRY_PORT=" << config.nmosRegistryPort << "\n";
+    out << "NMOS_QUERY_ADDRESS=" << config.nmosQueryAddress << "\n";
+    out << "NMOS_QUERY_PORT=" << config.nmosQueryPort << "\n";
     out << "NMOS_DNS_SD=" << (config.nmosDnsSd ? "true" : "false") << "\n";
     out << "NMOS_PORT=" << config.nmosPort << "\n";
     out << "NMOS_SEED=" << config.nmosSeed << "\n";
+    out << "NMOS_LABEL=" << config.nmosLabel << "\n";
     out << "WEB_PORT=" << config.webPort << "\n";
     out << "LOG_LEVEL=" << config.logLevel << "\n";
-    out << "SRTGW_PUBLIC_IP=" << config.publicIp << "\n";
+    out << "NMOS_HOST_ADDRESS=" << config.hostAddress << "\n";
+    out << "SRTGW_PUBLIC_IP=" << config.hostAddress << "\n";
+    out << "MXL_HISTORY_DURATION_MS=" << (config.historyDurationNs / 1000000) << "\n";
+    out << "STATE_DIR=" << config.stateDir << "\n";
+    out << "SHUTDOWN_TIMEOUT_S=" << config.shutdownTimeoutS << "\n";
+    out << "MXL_CLEANUP_ON_EXIT=" << (config.cleanupOnExit ? "true" : "false") << "\n";
     return out.str();
 }
 } // namespace srtgw
