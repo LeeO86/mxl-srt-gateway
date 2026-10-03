@@ -16,6 +16,7 @@
 #include <thread>
 
 #include <pthread.h>
+#include <sys/resource.h>
 
 #if defined(SRTGW_HAS_UI)
 #include "ops/webui_generated.hpp"
@@ -37,6 +38,15 @@ int main()
     sigaddset(&signals, SIGTERM);
     sigaddset(&signals, SIGINT);
     pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+    // Every MXL flow keeps one descriptor per grain (50 for 1 s at 50p) and every
+    // NVDEC channel opens a CUDA device. Docker's default soft limit of 1024 runs
+    // out at about 16 ingest channels, and the CUDA device then fails to open.
+    rlimit files{};
+    if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < files.rlim_max)
+    {
+        files.rlim_cur = files.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &files);
+    }
     std::thread([&signals] {
         int number = 0;
         if (sigwait(&signals, &number) == 0)

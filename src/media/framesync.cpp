@@ -62,8 +62,16 @@ SyncDecision FrameSynchroniser::choose(std::int64_t outputTimeNs, std::vector<So
     bool const haveSpaced = std::any_of(available.begin(), available.end(), [&](SourceFrame const& frame) {
         return frame.index == spaced && frame.mappedPtsNs <= deadline;
     });
-    decision.dropped = 1;
-    decision.sourceIndex = haveSpaced ? spaced : lastIndex_ + 1;
+    if (haveSpaced)
+    {
+        decision.dropped = 1;
+        decision.sourceIndex = spaced;
+        return decision;
+    }
+    // The frames after lastIndex_ have already left the buffer. Stepping one frame
+    // per output grain would never catch up and would write the slate forever.
+    decision.dropped = static_cast<int>(best->index - lastIndex_ - 1);
+    decision.sourceIndex = best->index;
     return decision;
 }
 

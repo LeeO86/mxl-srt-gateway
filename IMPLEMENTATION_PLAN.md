@@ -122,7 +122,8 @@ without returning the passphrase. Set `SRTGW_TEST_SECONDS=60` for the long TAI
 run. `tests/nmos/amwa.sh` is the AMWA suite runner, not part of default CI.
 
 Hardware numbers for A4000 and L4 are recorded by the procedure in
-`docs/hardware.md` rather than invented here.
+`docs/hardware.md` rather than invented here. A lab run on an NVIDIA A16 is
+recorded there; A4000 and L4 are still open.
 
 ## Platform guideline G1–G14
 

@@ -418,18 +418,28 @@ void NmosNode::start()
                             }
                         }
                     }
-                    nmos::modify_resource(nodeModel.node_resources, us(ids.device), [&](nmos::resource& resource) {
-                        resource.data[U("senders")] = web::json::value::array();
-                        resource.data[U("receivers")] = web::json::value::array();
-                        for (auto const& id : senderIds)
-                        {
-                            web::json::push_back(resource.data[U("senders")], web::json::value::string(id));
-                        }
-                        for (auto const& id : receiverIds)
-                        {
-                            web::json::push_back(resource.data[U("receivers")], web::json::value::string(id));
-                        }
-                    });
+                    auto senders = web::json::value::array();
+                    auto receivers = web::json::value::array();
+                    for (auto const& id : senderIds)
+                    {
+                        web::json::push_back(senders, web::json::value::string(id));
+                    }
+                    for (auto const& id : receiverIds)
+                    {
+                        web::json::push_back(receivers, web::json::value::string(id));
+                    }
+                    // Touch the device only when its lists change, with a new version: the
+                    // registry rejects an update whose version is not newer (400 every 500 ms).
+                    auto const device = nmos::find_resource(nodeModel.node_resources, us(ids.device));
+                    if (device != nodeModel.node_resources.end() &&
+                        (device->data.at(U("senders")) != senders || device->data.at(U("receivers")) != receivers))
+                    {
+                        nmos::modify_resource(nodeModel.node_resources, us(ids.device), [&](nmos::resource& resource) {
+                            resource.data[U("senders")] = senders;
+                            resource.data[U("receivers")] = receivers;
+                            resource.data[U("version")] = web::json::value::string(nmos::make_version());
+                        });
+                    }
                 };
                 sync();
                 nodeModel.notify();
