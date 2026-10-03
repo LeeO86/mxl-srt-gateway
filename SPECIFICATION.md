@@ -326,16 +326,24 @@ configuration exits 78; global changes flagged `restart_required`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `HOST_ID` | hostname | identity, NMOS seed |
-| `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | MXL root (readers resolve domains here) |
+| `HOST_ID` | hostname | default `NMOS_SEED` prefix. Not used as an announced address |
+| `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | parent of domain directories, mirrors included |
 | `MXL_OUTPUT_DOMAIN_DIR` | `/Volumes/mxl/srtgw-<seed-short>` | own output domain, created if missing |
-| `MXL_OUTPUT_DOMAIN_ID` | derived (UUIDv5) | stable domain ID |
+| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 from the seed | stable domain id. A different id already in `domain_def.json` is not overwritten |
+| `MXL_HISTORY_DURATION_MS` | `1000` | history duration when this process creates `options.json`. `SRTGW_HISTORY_DURATION_NS` is the previous name |
+| `MXL_CLEANUP_ON_EXIT` | `false` | SIGTERM deletes only this output domain directory |
+| `STATE_DIR` | `/config` | config persistence and IS-05 `routes.json` |
+| `SHUTDOWN_TIMEOUT_S` | `10` | SIGTERM budget. Exit code is 143 |
 | `DECODER` / `ENCODER` | `auto` | `auto`, `nvdec`/`nvenc`, `cpu` |
 | `SRT_PORT_RANGE` | `9000-9099` | allowed listener ports |
-| `NMOS_REGISTRY_ADDRESS` / `_PORT` | empty / 3210 | static registry |
-| `NMOS_DNS_SD` | false | |
-| `NMOS_PORT` | 3272 | Node API (WebSocket on +1) |
-| `NMOS_SEED` | `HOST_ID-srtgw` | deterministic IDs |
+| `NMOS_REGISTRY_ADDRESS` / `NMOS_REGISTRY_PORT` | empty / 3210 | Registration API |
+| `NMOS_QUERY_ADDRESS` / `NMOS_QUERY_PORT` | registry address / registry port + 1 | Query API. `/readyz` requires the node to be listed there when a registry is set |
+| `NMOS_DNS_SD` | false | off disables browse and mDNS advertisement |
+| `NMOS_PORT` | 3272 | Node API. WebSocket is this port + 1 |
+| `NMOS_SEED` | `HOST_ID-srtgw` | UUIDv5 for node, device, flows, senders, receivers, domain id |
+| `NMOS_LABEL` | unset | node and device label. Unset keeps the previous labels |
+| `NMOS_TAGS` | empty | JSON object of tag to string array, on the node and device |
+| `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | announced address. `SRTGW_PUBLIC_IP` is the same setting |
 | `WEB_PORT` | 8120 | UI, REST, health, metrics |
 | `LOG_LEVEL` | `info` | JSON logs |
 

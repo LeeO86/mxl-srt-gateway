@@ -24,11 +24,13 @@ spec:
       labels:
         app.kubernetes.io/name: mxl-srt-gateway
     spec:
+      terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 1000
+        supplementalGroups: [1000]
       containers:
         - name: gateway
-          image: ghcr.io/leeo86/mxl-srt-gateway:latest
+          image: ghcr.io/leeo86/mxl-srt-gateway:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -46,16 +48,30 @@ spec:
               value: nmos-registry
             - name: NMOS_REGISTRY_PORT
               value: "3210"
+            - name: NMOS_QUERY_PORT
+              value: "3211"
+            - name: NMOS_SEED
+              value: example-srtgw
+            - name: NMOS_LABEL
+              value: MXL SRT Gateway
+            - name: NMOS_TAGS
+              value: '{"urn:x-srf:production":["example"],"urn:x-srf:function":["srtgw"]}'
             - name: MXL_DOMAIN_SCAN_PATH
               value: /Volumes/mxl
             - name: MXL_OUTPUT_DOMAIN_DIR
               value: /Volumes/mxl/srtgw
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: STATE_DIR
+              value: /config
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
             - name: SRTGW_CONFIG_FILE
               value: /config/gateway.json
-            - name: SRTGW_PUBLIC_IP
+            - name: NMOS_HOST_ADDRESS
               valueFrom:
                 fieldRef:
-                  fieldPath: status.hostIP
+                  fieldPath: status.podIP
             - name: DECODER
               value: auto
             - name: ENCODER
@@ -93,8 +109,7 @@ spec:
             path: /Volumes/mxl
             type: DirectoryOrCreate
         - name: config
-          configMap:
-            name: mxl-srt-gateway
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

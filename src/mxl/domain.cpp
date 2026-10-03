@@ -30,14 +30,6 @@ std::string readFile(std::filesystem::path const& path)
     return buffer.str();
 }
 
-void writeFile(std::filesystem::path const& path, std::string const& text)
-{
-    std::ofstream out(path, std::ios::trunc);
-    if (out)
-    {
-        out << text;
-    }
-}
 } // namespace
 
 std::vector<DomainRecord> scanDomains(std::string const& root)
@@ -145,23 +137,12 @@ MxlDomain::MxlDomain(std::string path, std::string id, std::int64_t historyNs, b
     : path_(std::move(path))
     , id_(std::move(id))
 {
-    std::error_code ec;
     if (create)
     {
-        std::filesystem::create_directories(path_, ec);
-        if (ec)
+        std::string error;
+        if (!ensureOutputDomain(path_, id_, historyNs, &error))
         {
-            throw std::runtime_error("cannot create MXL domain " + path_);
-        }
-        auto const def = std::filesystem::path(path_) / "domain_def.json";
-        if (!std::filesystem::exists(def))
-        {
-            writeFile(def, std::string("{\"id\":\"") + id_ + "\",\"label\":\"mxl-srt-gateway\"}\n");
-        }
-        auto const options = std::filesystem::path(path_) / "options.json";
-        if (!std::filesystem::exists(options))
-        {
-            writeFile(options, std::string("{\"urn:x-mxl:option:history_duration/v1.0\":") + std::to_string(historyNs) + "}\n");
+            throw std::runtime_error(error.empty() ? "cannot prepare MXL domain " + path_ : error);
         }
     }
 #if SRTGW_WITH_MXL

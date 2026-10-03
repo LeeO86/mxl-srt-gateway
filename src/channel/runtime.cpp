@@ -1,11 +1,13 @@
 #include "channel/runtime.hpp"
 
 #include "nmos/ids.hpp"
+#include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 #include "util/net.hpp"
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -74,13 +76,116 @@ std::shared_ptr<MxlDomain> ChannelManager::outputDomain() const
     return output_;
 }
 
+void ChannelManager::loadRoutes()
+{
+    auto const path = store_.config().stateDir + "/routes.json";
+    std::ifstream in(path);
+    if (!in)
+    {
+        return;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    std::string error;
+    auto const root = json::parse(buffer.str(), &error);
+    if (!error.empty() || !root.is<picojson::object>())
+    {
+        log::warn("routes_unreadable", {{"path", path}});
+        return;
+    }
+    auto read = [](picojson::value const& value) {
+        FlowRoute route;
+        route.active = json::fieldBool(value, "active", false);
+        route.domainId = json::fieldString(value, "domain_id", "");
+        route.flowId = json::fieldString(value, "flow_id", "");
+        route.mirror = json::fieldBool(value, "mirror", false);
+        return route;
+    };
+    for (auto const& item : root.get<picojson::object>())
+    {
+        if (json::has(item.second, "video"))
+        {
+            videoRoutes_[item.first] = read(*json::field(item.second, "video"));
+        }
+        if (json::has(item.second, "audio"))
+        {
+            audioRoutes_[item.first] = read(*json::field(item.second, "audio"));
+        }
+    }
+    log::info("routes_loaded", {{"path", path}});
+}
+
+void ChannelManager::saveRoutes() const
+{
+    auto const dir = store_.config().stateDir;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+    {
+        log::warn("routes_not_saved", {{"path", dir}, {"error", ec.message()}});
+        return;
+    }
+    picojson::object root;
+    std::map<std::string, int> ids;
+    for (auto const& item : videoRoutes_)
+    {
+        ids[item.first] = 1;
+    }
+    for (auto const& item : audioRoutes_)
+    {
+        ids[item.first] = 1;
+    }
+    auto write = [](FlowRoute const& route) {
+        picojson::object obj;
+        obj["active"] = picojson::value(route.active);
+        obj["domain_id"] = picojson::value(route.domainId);
+        obj["flow_id"] = picojson::value(route.flowId);
+        obj["mirror"] = picojson::value(route.mirror);
+        return picojson::value(obj);
+    };
+    for (auto const& item : ids)
+    {
+        picojson::object channel;
+        if (videoRoutes_.count(item.first) != 0)
+        {
+            channel["video"] = write(videoRoutes_.at(item.first));
+        }
+        if (audioRoutes_.count(item.first) != 0)
+        {
+            channel["audio"] = write(audioRoutes_.at(item.first));
+        }
+        root[item.first] = picojson::value(channel);
+    }
+    auto const path = dir + "/routes.json";
+    std::ofstream out(path, std::ios::trunc);
+    if (!out)
+    {
+        log::warn("routes_not_saved", {{"path", path}});
+        return;
+    }
+    out << picojson::value(root).serialize() << '\n';
+}
+
 void ChannelManager::start()
 {
     auto const config = store_.config();
     ids_ = makeNmosIds(config.nmosSeed);
+    for (auto const& channel : config.channels)
+    {
+        if (!channel.enabled || channel.srt.mode == "caller" || channel.srt.localPort == 0)
+        {
+            continue;
+        }
+        std::string bindError;
+        if (!udpBindAvailable(channel.srt.localAddress, channel.srt.localPort, &bindError))
+        {
+            throw std::runtime_error("cannot bind UDP " + channel.id + " port " + std::to_string(channel.srt.localPort) + ": " + bindError);
+        }
+    }
     output_ = std::make_shared<MxlDomain>(config.mxlOutputDomainDir, config.mxlOutputDomainId, config.historyDurationNs, true);
     stop_.store(false);
     ready_.store(true);
+    loadRoutes();
     for (auto const& channel : config.channels)
     {
         if (channel.enabled)
@@ -122,12 +227,16 @@ void ChannelManager::launch(ChannelConfig const& channel)
             audioIds.push_back(ids_.audioFlow(channel, static_cast<int>(i)));
         }
         auto decoder = channel.decoder.empty() ? config.decoder : channel.decoder;
-        slot.ingest = std::make_unique<IngestPipeline>(channel, output_, ids_.videoFlow(channel), audioIds, decoder);
+        auto configured = channel;
+        configured.announceAddress = config.hostAddress;
+        slot.ingest = std::make_unique<IngestPipeline>(configured, output_, ids_.videoFlow(channel), audioIds, decoder);
         }
     else
     {
         auto encoder = channel.encoder.empty() ? config.encoder : channel.encoder;
-        slot.egress = std::make_unique<EgressPipeline>(channel, encoder, [this](std::string const& id, bool* mirror) { return openInput(id, mirror); },
+        auto configured = channel;
+        configured.announceAddress = config.hostAddress;
+        slot.egress = std::make_unique<EgressPipeline>(configured, encoder, [this](std::string const& id, bool* mirror) { return openInput(id, mirror); },
             [this, id = channel.id](bool video) { return route(id, video); });
     }
     IngestPipeline* ingest = nullptr;
@@ -277,6 +386,7 @@ void ChannelManager::setRoute(std::string const& id, bool video, FlowRoute route
         audioRoutes_[id] = std::move(route);
     }
     log::info("route_updated", {{"channel", id}, {"kind", video ? "video" : "audio"}, {"flow", video ? videoRoutes_[id].flowId : audioRoutes_[id].flowId}});
+    saveRoutes();
 }
 
 FlowRoute ChannelManager::route(std::string const& id, bool video) const

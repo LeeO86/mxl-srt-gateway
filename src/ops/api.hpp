@@ -11,7 +11,7 @@ namespace srtgw
 class Api
 {
 public:
-    Api(ConfigStore& store, ChannelManager& channels, std::function<std::string()> nmosSummary);
+    Api(ConfigStore& store, ChannelManager& channels, std::function<std::string()> nmosSummary, std::function<bool()> nmosRegistered);
 
     void setIndex(std::string html);
     HttpResponse handle(HttpRequest const& request) const;
@@ -20,6 +20,7 @@ private:
     ConfigStore& store_;
     ChannelManager& channels_;
     std::function<std::string()> nmosSummary_;
+    std::function<bool()> nmosRegistered_;
     std::string indexHtml_;
 };
 } // namespace srtgw

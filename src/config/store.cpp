@@ -160,13 +160,22 @@ void ConfigStore::replaceGlobals(std::map<std::string, std::string> const& value
         {"SRT_PORT_RANGE", std::to_string(loaded_.config.srtPortMin) + "-" + std::to_string(loaded_.config.srtPortMax)},
         {"NMOS_REGISTRY_ADDRESS", loaded_.config.nmosRegistryAddress},
         {"NMOS_REGISTRY_PORT", std::to_string(loaded_.config.nmosRegistryPort)},
+        {"NMOS_QUERY_ADDRESS", loaded_.config.nmosQueryAddress},
+        {"NMOS_QUERY_PORT", std::to_string(loaded_.config.nmosQueryPort)},
         {"NMOS_DNS_SD", loaded_.config.nmosDnsSd ? "true" : "false"},
         {"NMOS_PORT", std::to_string(loaded_.config.nmosPort)},
         {"NMOS_SEED", loaded_.config.nmosSeed},
+        {"NMOS_LABEL", loaded_.config.nmosLabel},
+        {"NMOS_TAGS", loaded_.config.nmosTagsJson},
         {"WEB_PORT", std::to_string(loaded_.config.webPort)},
         {"LOG_LEVEL", loaded_.config.logLevel},
-        {"SRTGW_PUBLIC_IP", loaded_.config.publicIp},
+        {"NMOS_HOST_ADDRESS", loaded_.config.hostAddress},
+        {"SRTGW_PUBLIC_IP", loaded_.config.hostAddress},
+        {"MXL_HISTORY_DURATION_MS", std::to_string(loaded_.config.historyDurationNs / 1000000)},
         {"SRTGW_HISTORY_DURATION_NS", std::to_string(loaded_.config.historyDurationNs)},
+        {"STATE_DIR", loaded_.config.stateDir},
+        {"SHUTDOWN_TIMEOUT_S", std::to_string(loaded_.config.shutdownTimeoutS)},
+        {"MXL_CLEANUP_ON_EXIT", loaded_.config.cleanupOnExit ? "true" : "false"},
     };
     for (auto const& key : globalKeys())
     {
@@ -220,7 +229,16 @@ void ConfigStore::importJson(std::string const& text)
     }
     for (auto const& key : globalKeys())
     {
-        if (json::has(root, key))
+        if (!json::has(root, key))
+        {
+            continue;
+        }
+        auto const value = json::field(root, key);
+        if (value && (value->is<picojson::object>() || value->is<picojson::array>()))
+        {
+            globals[key] = value->serialize();
+        }
+        else
         {
             globals[key] = json::fieldString(root, key, "");
         }
@@ -231,7 +249,47 @@ void ConfigStore::importJson(std::string const& text)
     }
     auto const filePath = loaded_.config.configFile;
     std::lock_guard const lock{mutex_};
+    auto const previous = loaded_.config.channels;
     auto reloaded = loadFromSources(globals, channels, {});
+    for (auto& channel : reloaded.config.channels)
+    {
+        bool passphraseSent = false;
+        bool backupPassphraseSent = false;
+        if (json::has(root, "channels") && json::field(root, "channels")->is<picojson::array>())
+        {
+            for (auto const& item : json::field(root, "channels")->get<picojson::array>())
+            {
+                if (json::fieldString(item, "id", "") != channel.id)
+                {
+                    continue;
+                }
+                if (json::has(item, "srt") && json::has(*json::field(item, "srt"), "passphrase"))
+                {
+                    passphraseSent = true;
+                }
+                if (json::has(item, "backup") && json::has(*json::field(item, "backup"), "endpoint") &&
+                    json::has(*json::field(*json::field(item, "backup"), "endpoint"), "passphrase"))
+                {
+                    backupPassphraseSent = true;
+                }
+            }
+        }
+        for (auto const& old : previous)
+        {
+            if (old.id != channel.id)
+            {
+                continue;
+            }
+            if (!passphraseSent)
+            {
+                channel.srt.passphrase = old.srt.passphrase;
+            }
+            if (!backupPassphraseSent)
+            {
+                channel.backup.endpoint.passphrase = old.backup.endpoint.passphrase;
+            }
+        }
+    }
     reloaded.config.configFile = filePath;
     reloaded.restartRequired = true;
     loaded_ = std::move(reloaded);

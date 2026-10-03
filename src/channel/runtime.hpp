@@ -36,6 +36,8 @@ private:
     void supervise();
     std::shared_ptr<MxlDomain> openInput(std::string const& domainId, bool* mirror);
     void launch(ChannelConfig const& channel);
+    void loadRoutes();
+    void saveRoutes() const;
 
     ConfigStore& store_;
     std::shared_ptr<MxlDomain> output_;

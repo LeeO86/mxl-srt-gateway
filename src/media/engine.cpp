@@ -478,7 +478,7 @@ IngestPipeline::IngestPipeline(ChannelConfig config, std::shared_ptr<MxlDomain> 
     , shared_(std::make_unique<Shared>())
 {
     status_.targetFormat = config_.target.label();
-    status_.request = publicRequest(config_, config_.srt.localAddress);
+    status_.request = publicRequest(config_, config_.announceAddress.empty() ? config_.srt.localAddress : config_.announceAddress);
 }
 
 IngestPipeline::~IngestPipeline()
@@ -1375,7 +1375,7 @@ void IngestPipeline::runClock()
             status.tracks.push_back(queue.info);
             status.tracks.back().missing = queue.missing;
         }
-        status.request = publicRequest(config_, primaryIpv4());
+        status.request = publicRequest(config_, config_.announceAddress.empty() ? primaryIpv4() : config_.announceAddress);
         publish(status);
         ++index;
     }
@@ -2012,7 +2012,7 @@ void EgressPipeline::run()
         status.encodeLatencySum = status_.encodeLatencySum;
         status.latencyBuckets = status_.latencyBuckets;
         status.failover = config_.backup.enabled && duplicate.connected();
-        status.request = publicRequest(config_, primaryIpv4());
+        status.request = publicRequest(config_, config_.announceAddress.empty() ? primaryIpv4() : config_.announceAddress);
         if (monoNowMs() % 1000 < 40)
         {
             status.jpeg = encodeJpeg(picture.data(), source.width, source.height);

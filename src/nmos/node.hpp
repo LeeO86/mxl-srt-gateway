@@ -17,6 +17,8 @@ public:
     void stop();
     [[nodiscard]] std::string summary() const;
     [[nodiscard]] bool running() const;
+    // True when no registry is configured, or the Query API currently lists this node.
+    [[nodiscard]] bool registered() const;
 
 private:
     struct Impl;
