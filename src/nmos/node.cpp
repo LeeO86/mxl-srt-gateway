@@ -466,7 +466,7 @@ void NmosNode::start()
             }
             if (!impl_->config.nmosRegistryAddress.empty())
             {
-                auto const path = "/x-nmos/registration/v1.3/resource/node/" + impl_->ids.node;
+                auto const path = "/x-nmos/registration/v1.3/resource/nodes/" + impl_->ids.node;
                 auto const status = httpDelete(impl_->config.nmosRegistryAddress, impl_->config.nmosRegistryPort, path, 2000);
                 log::info("nmos_deregister", {{"status", std::to_string(status)}});
             }

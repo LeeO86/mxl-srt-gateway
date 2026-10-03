@@ -12,6 +12,8 @@
   MXL flow keeps a descriptor per grain, and with Docker's default of 1024 the
   CUDA device of about the 13th ingest channel failed to open (silent CPU
   fallback).
+- The SIGTERM DELETE of the node used `/resource/node/<id>`; the Registration
+  API path is `/resource/nodes/<id>` (nmos-cpp answered 404).
 
 ## 1.0.0
 
