@@ -492,6 +492,13 @@ void NmosNode::start()
     {
         throw std::runtime_error(impl_->error);
     }
+    // nmos-cpp fe30384 (server.cpp open_listeners) swallows listener errors, so a
+    // busy port opens "successfully". Check that this process really listens.
+    if (impl_->running.load() && !processListensOn(impl_->config.nmosPort))
+    {
+        stop();
+        throw std::runtime_error("NMOS_PORT " + std::to_string(impl_->config.nmosPort) + " is in use or cannot be bound");
+    }
 }
 
 void NmosNode::stop()

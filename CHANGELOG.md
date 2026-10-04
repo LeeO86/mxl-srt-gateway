@@ -2,7 +2,7 @@
 
 ## 1.1.1
 
-- A failed start of the NMOS node (in practice a busy `NMOS_PORT`) exits 75, like a busy web port. Before, the gateway logged `nmos_start_failed` and ran on without IS-04/IS-05.
+- A busy `NMOS_PORT` exits 75, like a busy web port. nmos-cpp swallows listener errors, so the gateway now checks that it really listens on the port after the node started (`/proc/net/tcp{,6}` and its own sockets), as the ST 2110 gateway does. Before, it ran on without IS-04/IS-05; a start error it did see was only logged (`nmos_start_failed`).
 
 ## 1.1.0
 
