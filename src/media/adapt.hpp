@@ -43,6 +43,8 @@ struct AdaptationPlan
 AdaptationPlan planAdaptation(VideoFormat source, VideoFormat const& target, std::string const& deinterlacer, std::string const& aspect,
     std::string const& kernel, std::string const& sourceScan);
 
-std::string ffmpegFilter(AdaptationPlan const& plan, bool cuda);
+// `keepCuda`: when every step runs on CUDA, end the chain on the GPU (no download,
+// no format conversion); the result is "null" when there is nothing to do.
+std::string ffmpegFilter(AdaptationPlan const& plan, bool cuda, bool keepCuda = false);
 std::string deintName(Deint deint);
 } // namespace srtgw

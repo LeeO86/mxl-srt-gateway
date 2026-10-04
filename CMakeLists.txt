@@ -70,6 +70,7 @@ if(SRTGW_HAVE_MEDIA)
     add_library(srtgw-media STATIC
         src/srt/socket.cpp
         src/media/engine.cpp
+        src/media/cuda_convert.cpp
         src/mxl/domain.cpp
         src/channel/runtime.cpp
         src/ops/httpserver.cpp
@@ -79,6 +80,37 @@ if(SRTGW_HAVE_MEDIA)
     target_include_directories(srtgw-media PUBLIC src third_party ${CMAKE_CURRENT_BINARY_DIR}/generated)
     target_link_libraries(srtgw-media PUBLIC srtgw-core PkgConfig::FFMPEG PkgConfig::SRT)
     target_compile_options(srtgw-media PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+    # v210 <-> NV12/P010 kernels for the NVDEC and NVENC paths. Clang compiles them
+    # to PTX without CUDA headers or libraries (like FFmpeg's --enable-cuda-llvm
+    # filters); the PTX is embedded and loaded through the driver at runtime.
+    find_program(SRTGW_CLANG NAMES clang++ clang)
+    find_path(SRTGW_FFNVCODEC_INCLUDE ffnvcodec/dynlink_loader.h)
+    if(SRTGW_CLANG AND SRTGW_FFNVCODEC_INCLUDE)
+        set(V210_PTX ${CMAKE_CURRENT_BINARY_DIR}/generated/v210_cuda.ptx)
+        set(V210_PTX_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/media/v210_cuda_ptx.hpp)
+        add_custom_command(
+            OUTPUT ${V210_PTX}
+            COMMAND ${SRTGW_CLANG} -x cuda --cuda-device-only -nocudainc -nocudalib --cuda-gpu-arch=sm_60 -O2 -S
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/media/v210_cuda.cu -o ${V210_PTX}
+            DEPENDS src/media/v210_cuda.cu
+            COMMENT "Compiling v210 CUDA kernels to PTX"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT ${V210_PTX_HEADER}
+            COMMAND ${CMAKE_COMMAND} -DINPUT=${V210_PTX} -DOUTPUT=${V210_PTX_HEADER} -DVAR=v210CudaPtx -DNAMESPACE=srtgw::cudaconvert
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedFile.cmake
+            DEPENDS ${V210_PTX} cmake/EmbedFile.cmake
+            COMMENT "Embedding v210 CUDA kernels"
+        )
+        target_sources(srtgw-media PRIVATE ${V210_PTX_HEADER})
+        target_include_directories(srtgw-media PRIVATE ${SRTGW_FFNVCODEC_INCLUDE})
+        target_compile_definitions(srtgw-media PRIVATE SRTGW_WITH_CUDA_CONVERT=1)
+        target_link_libraries(srtgw-media PUBLIC ${CMAKE_DL_LIBS})
+    else()
+        message(STATUS "v210 CUDA kernels disabled (clang or ffnvcodec headers missing): CPU conversion only")
+    endif()
     if(mxl_FOUND)
         target_link_libraries(srtgw-media PUBLIC mxl::mxl)
         target_compile_definitions(srtgw-media PUBLIC SRTGW_WITH_MXL=1)

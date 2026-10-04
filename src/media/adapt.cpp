@@ -162,7 +162,7 @@ AdaptationPlan planAdaptation(VideoFormat source, VideoFormat const& target, std
     return plan;
 }
 
-std::string ffmpegFilter(AdaptationPlan const& plan, bool cuda)
+std::string ffmpegFilter(AdaptationPlan const& plan, bool cuda, bool keepCuda)
 {
     std::string chain;
     auto add = [&](std::string const& step) {
@@ -277,6 +277,11 @@ std::string ffmpegFilter(AdaptationPlan const& plan, bool cuda)
         add(std::string("split[psf_a][psf_b];[psf_a][psf_b]interleave,tinterlace=mode=") + (order == "bff" ? "interleave_bottom" : "interleave_top"));
     }
 
+    if (keepCuda && onCuda)
+    {
+        // Every step ran on the GPU: the caller converts the CUDA frame to v210 there.
+        return chain.empty() ? "null" : chain;
+    }
     download();
     add("format=yuv422p10le");
     return chain;
