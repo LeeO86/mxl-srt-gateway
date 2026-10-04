@@ -18,6 +18,6 @@ int httpDelete(std::string const& host, int port, std::string const& path, int t
 bool ipv4InCidr(std::string_view ip, std::string_view cidr);
 std::uint64_t taiNowNs();
 std::int64_t monoNowMs();
-// True if this process owns a TCP socket listening on `port` (/proc/net/tcp{,6} and /proc/self/fd).
-bool processListensOn(int port);
+// Bind and release a TCP socket on 0.0.0.0:port.
+bool tcpBindAvailable(int port, std::string* error);
 } // namespace srtgw
