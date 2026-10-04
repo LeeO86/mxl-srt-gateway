@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- An ingest channel that fell more than the frame queue (8 frames) behind
+  the decoder wrote the loss slate forever while it reported `running`, and
+  counted a frame-sync drop on every grain. It now jumps to the newest frame.
+- The device is re-registered only when its sender or receiver list changes,
+  with a new version. Before, it was sent every 500 ms with the old version and
+  the registry answered 400 each time.
+- The process raises its open-file soft limit to the hard limit at start. Each
+  MXL flow keeps a descriptor per grain, and with Docker's default of 1024 the
+  CUDA device of about the 13th ingest channel failed to open (silent CPU
+  fallback).
+- The SIGTERM DELETE of the node used `/resource/node/<id>`; the Registration
+  API path is `/resource/nodes/<id>` (nmos-cpp answered 404).
+
 ## 1.0.0
 
 Stable settings and API contract for the MXL platform. A later breaking change

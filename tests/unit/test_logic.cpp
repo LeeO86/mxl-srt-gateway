@@ -326,6 +326,28 @@ TEST_CASE("frame synchroniser repeats, drops one at a time, and holds")
     CHECK(late.slate);
 }
 
+TEST_CASE("frame synchroniser resyncs when the next frames have left the buffer")
+{
+    // Output last showed frame 10; the decoder kept going and the buffer now
+    // holds only frames 20..27 (eight frames, like the ingest queue).
+    FrameSynchroniser sync(0, 1000000000);
+    sync.commit(SyncDecision{false, false, 0, 10});
+    std::vector<SourceFrame> frames;
+    for (int i = 20; i < 28; ++i)
+    {
+        frames.push_back(SourceFrame{i, static_cast<std::int64_t>(i) * 20000000});
+    }
+    auto const decision = sync.choose(27 * 20000000, frames);
+    CHECK_FALSE(decision.slate);
+    CHECK(decision.sourceIndex == 27);
+    CHECK(decision.dropped == 16);
+    sync.commit(decision);
+    frames.push_back(SourceFrame{28, 28 * 20000000});
+    auto const next = sync.choose(28 * 20000000, frames);
+    CHECK(next.sourceIndex == 28);
+    CHECK(next.dropped == 0);
+}
+
 TEST_CASE("channel map applies gain and silence")
 {
     std::vector<float> stereo(8);

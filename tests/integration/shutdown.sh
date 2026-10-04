@@ -149,8 +149,8 @@ if ! wait_ready 40; then
   exit 1
 fi
 stop_and_check
-if ! grep -q "DELETE " "$WORK/reg.log"; then
-  echo "registry did not see a DELETE" >&2
+if ! grep -q "DELETE /x-nmos/registration/v1.3/resource/nodes/" "$WORK/reg.log"; then
+  echo "registry did not see a DELETE of the node (resource/nodes/<id>)" >&2
   cat "$WORK/reg.log" >&2 || true
   cat "$WORK/gw.log" >&2 || true
   exit 1
