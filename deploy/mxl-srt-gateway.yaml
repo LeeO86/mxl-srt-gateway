@@ -30,7 +30,7 @@ spec:
         supplementalGroups: [1000]
       containers:
         - name: gateway
-          image: ghcr.io/leeo86/mxl-srt-gateway:1.1.0
+          image: ghcr.io/leeo86/mxl-srt-gateway:1.1.1
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

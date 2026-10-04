@@ -79,7 +79,10 @@ int main()
         }
         catch (std::exception const& ex)
         {
-            log::error("nmos_start_failed", {{"error", ex.what()}});
+            // Mostly a port that cannot be bound: exit 75 like the web port.
+            log::error("nmos_start_failed", {{"port", std::to_string(store.config().nmosPort)}, {"error", ex.what()}});
+            channels.stop();
+            return 75;
         }
         Api api(store, channels, [&nmos] { return nmos.summary(); }, [&nmos] { return nmos.registered(); });
 #if defined(SRTGW_HAS_UI)
