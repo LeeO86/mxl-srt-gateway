@@ -15,9 +15,12 @@ extern "C"
 #include <libavutil/hwcontext_cuda.h>
 }
 
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
+
+#include <dlfcn.h>
 
 namespace srtgw::cudaconvert
 {
@@ -28,6 +31,33 @@ CudaFunctions* driver()
     static CudaFunctions* const loaded = [] {
         CudaFunctions* functions = nullptr;
         return cuda_load_functions(&functions, nullptr) == 0 ? functions : nullptr;
+    }();
+    return loaded;
+}
+
+// Page-locked host memory: the ffnvcodec loader does not load these two.
+struct HostMemory
+{
+    using Alloc = CUresult (*)(void**, std::size_t);
+    using Free = CUresult (*)(void*);
+    Alloc alloc = nullptr;
+    Free free = nullptr;
+};
+
+HostMemory const& hostMemory()
+{
+    static HostMemory const loaded = [] {
+        HostMemory h;
+        if (void* lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL))
+        {
+            h.alloc = reinterpret_cast<HostMemory::Alloc>(dlsym(lib, "cuMemAllocHost_v2"));
+            h.free = reinterpret_cast<HostMemory::Free>(dlsym(lib, "cuMemFreeHost"));
+            if (h.alloc == nullptr || h.free == nullptr)
+            {
+                h = HostMemory{};
+            }
+        }
+        return h;
     }();
     return loaded;
 }
@@ -114,6 +144,37 @@ struct Scratch
     CUcontext context = nullptr;
     CUdeviceptr device = 0;
     std::size_t bytes = 0;
+    // Page-locked staging for the copies: from or into pageable memory the driver
+    // copies through its own staging at about half the link rate, and 16 ingest
+    // channels of v210 (4.4 GB/s) no longer fitted a x4 link.
+    void* host = nullptr;
+    std::size_t hostBytes = 0;
+
+    void* ensureHost(std::size_t need)
+    {
+        auto const& memory = hostMemory();
+        if (memory.alloc == nullptr)
+        {
+            return nullptr;
+        }
+        if (host != nullptr && hostBytes >= need)
+        {
+            return host;
+        }
+        if (host != nullptr)
+        {
+            memory.free(host);
+        }
+        host = nullptr;
+        hostBytes = 0;
+        if (memory.alloc(&host, need) != CUDA_SUCCESS)
+        {
+            host = nullptr;
+            return nullptr;
+        }
+        hostBytes = need;
+        return host;
+    }
 
     CUdeviceptr ensure(CudaFunctions* cu, CUcontext ctx, std::size_t need)
     {
@@ -200,10 +261,19 @@ bool toV210(AVFrame const* frame, bool interlaced, std::vector<std::uint8_t>& ou
     void* args[] = {&luma, &lumaPitch, &chroma, &chromaPitch, &width, &height, &fields, &dst, &rowBytes};
     CUfunction const kernel = frames->sw_format == AV_PIX_FMT_P010 ? k->p010ToV210 : k->nv12ToV210;
     out.resize(bytes);
-    // The decoder writes its frames on this stream; the copy into pageable memory
-    // returns when the bytes are in `out`.
-    return cu->cuLaunchKernel(kernel, groupBlocks(width), static_cast<unsigned>(height), 1, kBlock, 1, 1, 0, device->stream, args, nullptr) == CUDA_SUCCESS &&
-           cu->cuMemcpyDtoHAsync(out.data(), dst, bytes, device->stream) == CUDA_SUCCESS && cu->cuStreamSynchronize(device->stream) == CUDA_SUCCESS;
+    // The decoder writes its frames on this stream.
+    void* const host = scratch().ensureHost(bytes);
+    if (cu->cuLaunchKernel(kernel, groupBlocks(width), static_cast<unsigned>(height), 1, kBlock, 1, 1, 0, device->stream, args, nullptr) != CUDA_SUCCESS ||
+        cu->cuMemcpyDtoHAsync(host != nullptr ? host : out.data(), dst, bytes, device->stream) != CUDA_SUCCESS ||
+        cu->cuStreamSynchronize(device->stream) != CUDA_SUCCESS)
+    {
+        return false;
+    }
+    if (host != nullptr)
+    {
+        std::memcpy(out.data(), host, bytes);
+    }
+    return true;
 }
 
 bool toNv12(std::uint8_t const* v210, int width, int height, bool interlaced, AVFrame* frame)
@@ -234,8 +304,13 @@ bool toNv12(std::uint8_t const* v210, int width, int height, bool interlaced, AV
     int chromaPitch = frame->linesize[1];
     int fields = interlaced ? 1 : 0;
     void* args[] = {&src, &rowBytes, &width, &height, &fields, &luma, &lumaPitch, &chroma, &chromaPitch};
+    void* const host = scratch().ensureHost(bytes);
+    if (host != nullptr)
+    {
+        std::memcpy(host, v210, bytes);
+    }
     // The encoder reads the frame after this returns, so wait for the kernel here.
-    return cu->cuMemcpyHtoDAsync(src, v210, bytes, device->stream) == CUDA_SUCCESS &&
+    return cu->cuMemcpyHtoDAsync(src, host != nullptr ? host : v210, bytes, device->stream) == CUDA_SUCCESS &&
            cu->cuLaunchKernel(k->v210ToNv12, groupBlocks(width), static_cast<unsigned>((height + 1) / 2), 1, kBlock, 1, 1, 0, device->stream, args, nullptr) ==
                CUDA_SUCCESS &&
            cu->cuStreamSynchronize(device->stream) == CUDA_SUCCESS;
