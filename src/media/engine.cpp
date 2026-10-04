@@ -984,11 +984,14 @@ void IngestPipeline::runIo()
                             graphCuda = false;
                             graphOnGpu = false;
                             outputInterlaced = plan.output.interlaced;
-                            if (frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx != nullptr && cudaFilterChainAvailable(plan))
+                            // A source already in the target format needs no step; it also stays on
+                            // the GPU (the CUDA chain is just "null") and is packed there.
+                            bool const keep = !gpuPackFailed && cudaconvert::available();
+                            bool const passthrough = keep && ffmpegFilter(plan, true, true) == "null";
+                            if (frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx != nullptr && (cudaFilterChainAvailable(plan) || passthrough))
                             {
                                 // When every step runs on CUDA, the frame stays on the GPU and is
                                 // packed to v210 there; only the packed picture is downloaded.
-                                bool const keep = !gpuPackFailed && cudaconvert::available();
                                 std::string const desc = ffmpegFilter(plan, true, keep);
                                 bool const onGpu = keep && desc.find("hwdownload") == std::string::npos;
                                 int const graphError = configureFilterGraph(&graph, &sourceFilter, &sinkFilter, frame, timeBase, detected.sarNum, detected.sarDen, desc,
