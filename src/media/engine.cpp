@@ -1,6 +1,7 @@
 #include "media/engine.hpp"
 
 #include "media/adapt.hpp"
+#include "media/cuda_convert.hpp"
 #include "media/framesync.hpp"
 #include "media/matrix.hpp"
 #include "media/slate.hpp"
@@ -15,6 +16,7 @@ extern "C"
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
@@ -242,6 +244,49 @@ void appendPipe(BytePipe& pipe, std::uint8_t const* data, int size)
     pipe.up = true;
 }
 
+// The v210 codecs are intra-only and cheap to run but not to open: one context per
+// thread and raster instead of one per frame.
+struct V210Codec
+{
+    AVCodecContext* ctx = nullptr;
+    int width = 0;
+    int height = 0;
+
+    ~V210Codec()
+    {
+        avcodec_free_context(&ctx);
+    }
+
+    AVCodecContext* get(bool encoder, int w, int h)
+    {
+        if (ctx != nullptr && width == w && height == h)
+        {
+            return ctx;
+        }
+        avcodec_free_context(&ctx);
+        AVCodec const* codec = encoder ? avcodec_find_encoder(AV_CODEC_ID_V210) : avcodec_find_decoder(AV_CODEC_ID_V210);
+        if (codec == nullptr || (ctx = avcodec_alloc_context3(codec)) == nullptr)
+        {
+            return nullptr;
+        }
+        ctx->width = w;
+        ctx->height = h;
+        if (encoder)
+        {
+            ctx->pix_fmt = AV_PIX_FMT_YUV422P10LE;
+            ctx->time_base = AVRational{1, 25};
+        }
+        if (avcodec_open2(ctx, codec, nullptr) < 0)
+        {
+            avcodec_free_context(&ctx);
+            return nullptr;
+        }
+        width = w;
+        height = h;
+        return ctx;
+    }
+};
+
 std::vector<std::uint8_t> packV210(AVFrame* frame)
 {
     std::vector<std::uint8_t> packed;
@@ -249,19 +294,10 @@ std::vector<std::uint8_t> packV210(AVFrame* frame)
     {
         return packed;
     }
-    AVCodec const* codec = avcodec_find_encoder(AV_CODEC_ID_V210);
-    if (codec == nullptr)
+    thread_local V210Codec encoder;
+    AVCodecContext* ctx = encoder.get(true, frame->width, frame->height);
+    if (ctx == nullptr)
     {
-        return packed;
-    }
-    AVCodecContext* ctx = avcodec_alloc_context3(codec);
-    ctx->width = frame->width;
-    ctx->height = frame->height;
-    ctx->pix_fmt = AV_PIX_FMT_YUV422P10LE;
-    ctx->time_base = AVRational{1, 25};
-    if (avcodec_open2(ctx, codec, nullptr) < 0)
-    {
-        avcodec_free_context(&ctx);
         return packed;
     }
     AVPacket* packet = av_packet_alloc();
@@ -270,23 +306,19 @@ std::vector<std::uint8_t> packV210(AVFrame* frame)
         packed.assign(packet->data, packet->data + packet->size);
     }
     av_packet_free(&packet);
-    avcodec_free_context(&ctx);
     return packed;
 }
 
 AVFrame* unpackV210(std::uint8_t const* data, int size, int width, int height)
 {
-    AVCodec const* codec = avcodec_find_decoder(AV_CODEC_ID_V210);
-    if (codec == nullptr || data == nullptr || size <= 0)
+    if (data == nullptr || size <= 0)
     {
         return nullptr;
     }
-    AVCodecContext* ctx = avcodec_alloc_context3(codec);
-    ctx->width = width;
-    ctx->height = height;
-    if (avcodec_open2(ctx, codec, nullptr) < 0)
+    thread_local V210Codec decoder;
+    AVCodecContext* ctx = decoder.get(false, width, height);
+    if (ctx == nullptr)
     {
-        avcodec_free_context(&ctx);
         return nullptr;
     }
     AVPacket* packet = av_packet_alloc();
@@ -300,7 +332,6 @@ AVFrame* unpackV210(std::uint8_t const* data, int size, int width, int height)
     packet->data = nullptr;
     packet->size = 0;
     av_packet_free(&packet);
-    avcodec_free_context(&ctx);
     return frame;
 }
 
@@ -410,6 +441,36 @@ const AVCodec* findVideoDecoder(AVCodecID id, std::string const& prefer, std::st
     return codec;
 }
 
+// NV12 CUDA frames for NVENC input, in the GPU's primary context.
+AVBufferRef* cudaFramePool(int width, int height)
+{
+    AVBufferRef* device = nullptr;
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "primary_ctx", "1", 0);
+    int const created = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, nullptr, options, 0);
+    av_dict_free(&options);
+    if (created < 0)
+    {
+        return nullptr;
+    }
+    AVBufferRef* frames = av_hwframe_ctx_alloc(device);
+    av_buffer_unref(&device);
+    if (frames == nullptr)
+    {
+        return nullptr;
+    }
+    auto* ctx = reinterpret_cast<AVHWFramesContext*>(frames->data);
+    ctx->format = AV_PIX_FMT_CUDA;
+    ctx->sw_format = AV_PIX_FMT_NV12;
+    ctx->width = width;
+    ctx->height = height;
+    if (av_hwframe_ctx_init(frames) < 0)
+    {
+        av_buffer_unref(&frames);
+    }
+    return frames;
+}
+
 bool openDecoder(AVCodecContext** ctx, AVCodec const* codec, AVCodecParameters const* params, AVBufferRef* hw)
 {
     *ctx = avcodec_alloc_context3(codec);
@@ -441,7 +502,8 @@ struct IngestPipeline::Shared
     std::mutex mediaMu;
     struct Frame
     {
-        std::vector<std::uint8_t> bytes;
+        // Shared: the writer takes a frame per output grain without copying the picture.
+        std::shared_ptr<std::vector<std::uint8_t> const> bytes;
         std::int64_t ptsNs = 0;
         std::int64_t index = 0;
         std::string timecode;
@@ -765,7 +827,13 @@ void IngestPipeline::runIo()
         AVCodecContext* videoCtx = nullptr;
         if (hardware)
         {
-            if (av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0)
+            // Every channel shares the GPU's primary context. A context per connection
+            // costs device memory, and kernels of different contexts never overlap.
+            AVDictionary* options = nullptr;
+            av_dict_set(&options, "primary_ctx", "1", 0);
+            int const created = av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, nullptr, options, 0);
+            av_dict_free(&options);
+            if (created < 0)
             {
                 hw = nullptr;
                 hardware = false;
@@ -851,6 +919,10 @@ void IngestPipeline::runIo()
         VideoFormat filteredSource;
         bool haveGraph = false;
         bool graphCuda = false;
+        // The graph ends on the GPU and its frames are packed to v210 there.
+        bool graphOnGpu = false;
+        bool outputInterlaced = false;
+        bool gpuPackFailed = false;
         double offset = 0;
         bool haveOffset = false;
         std::int64_t frameIndex = 0;
@@ -910,16 +982,27 @@ void IngestPipeline::runIo()
                             auto const timeBase = fmt->streams[videoStream]->time_base;
                             bool built = false;
                             graphCuda = false;
-                            if (frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx != nullptr && cudaFilterChainAvailable(plan))
+                            graphOnGpu = false;
+                            outputInterlaced = plan.output.interlaced;
+                            // A source already in the target format needs no step; it also stays on
+                            // the GPU (the CUDA chain is just "null") and is packed there.
+                            bool const keep = !gpuPackFailed && cudaconvert::available();
+                            bool const passthrough = keep && ffmpegFilter(plan, true, true) == "null";
+                            if (frame->format == AV_PIX_FMT_CUDA && frame->hw_frames_ctx != nullptr && (cudaFilterChainAvailable(plan) || passthrough))
                             {
-                                std::string const desc = ffmpegFilter(plan, true);
+                                // When every step runs on CUDA, the frame stays on the GPU and is
+                                // packed to v210 there; only the packed picture is downloaded.
+                                std::string const desc = ffmpegFilter(plan, true, keep);
+                                bool const onGpu = keep && desc.find("hwdownload") == std::string::npos;
                                 int const graphError = configureFilterGraph(&graph, &sourceFilter, &sinkFilter, frame, timeBase, detected.sarNum, detected.sarDen, desc,
-                                    true, AV_PIX_FMT_YUV422P10LE);
+                                    true, onGpu ? AV_PIX_FMT_CUDA : AV_PIX_FMT_YUV422P10LE);
                                 built = graphError >= 0;
                                 if (built)
                                 {
                                     graphCuda = true;
-                                    log::info("adapter_configured", {{"channel", config_.id}, {"plan", plan.summary}, {"cuda", "true"}});
+                                    graphOnGpu = onGpu;
+                                    log::info("adapter_configured",
+                                        {{"channel", config_.id}, {"plan", plan.summary}, {"cuda", "true"}, {"v210", onGpu ? "gpu" : "cpu"}});
                                 }
                                 else
                                 {
@@ -1014,7 +1097,25 @@ void IngestPipeline::runIo()
                                     adapted.height = filtered->height;
                                     adapted.ptsNs = ptsNs + static_cast<std::int64_t>(offset);
                                     adapted.index = frameIndex++;
-                                    adapted.bytes = packV210(filtered);
+                                    if (graphOnGpu)
+                                    {
+                                        auto packed = std::make_shared<std::vector<std::uint8_t>>();
+                                        if (cudaconvert::toV210(filtered, outputInterlaced, *packed))
+                                        {
+                                            adapted.bytes = std::move(packed);
+                                        }
+                                        else
+                                        {
+                                            // Rebuild on the next frame with the CPU conversion.
+                                            log::error("gpu_v210_failed", {{"channel", config_.id}});
+                                            gpuPackFailed = true;
+                                            filteredSource = VideoFormat{};
+                                        }
+                                    }
+                                    else
+                                    {
+                                        adapted.bytes = std::make_shared<std::vector<std::uint8_t> const>(packV210(filtered));
+                                    }
                                     if (AVFrameSideData* side = av_frame_get_side_data(filtered, AV_FRAME_DATA_S12M_TIMECODE))
                                     {
                                         if (side->size >= 16)
@@ -1246,13 +1347,13 @@ void IngestPipeline::runClock()
             std::lock_guard const lock{shared_->mediaMu};
             for (auto const& frame : shared_->frames)
             {
-                if (frame.index == decision.sourceIndex)
+                if (frame.index == decision.sourceIndex && frame.bytes)
                 {
                     chosen = frame;
                     haveChosen = true;
                     timecode = frame.timecode;
-                    picture = chosen.bytes.data();
-                    pictureSize = chosen.bytes.size();
+                    picture = chosen.bytes->data();
+                    pictureSize = chosen.bytes->size();
                     break;
                 }
             }
@@ -1344,7 +1445,7 @@ void IngestPipeline::runClock()
         ++frames;
         if (monoNowMs() - lastJpeg > 1000 && haveChosen)
         {
-            auto jpeg = encodeJpeg(chosen.bytes.data(), chosen.width, chosen.height);
+            auto jpeg = encodeJpeg(chosen.bytes->data(), chosen.width, chosen.height);
             std::lock_guard const lock{statusMu_};
             status_.jpeg = std::move(jpeg);
             lastJpeg = monoNowMs();
@@ -1486,6 +1587,9 @@ void EgressPipeline::run()
     std::string openAudio;
     std::unique_ptr<MxlSync> sync;
     AVCodecContext* videoEnc = nullptr;
+    // NVENC input frames on the GPU (primary CUDA context), when the converter is available.
+    AVBufferRef* gpuFrames = nullptr;
+    bool gpuConvertFailed = false;
     AVFilterGraph* graph = nullptr;
     AVFilterContext* sourceFilter = nullptr;
     AVFilterContext* sinkFilter = nullptr;
@@ -1523,6 +1627,7 @@ void EgressPipeline::run()
         }
         audioEnc.clear();
         avcodec_free_context(&videoEnc);
+        av_buffer_unref(&gpuFrames);
         avfilter_graph_free(&graph);
     };
 
@@ -1583,6 +1688,17 @@ void EgressPipeline::run()
             av_opt_set(videoEnc->priv_data, "tune", config_.egress.nvencTune.c_str(), 0);
             av_opt_set(videoEnc->priv_data, "rc", "cbr", 0);
             av_opt_set(videoEnc->priv_data, "forced-idr", "1", 0);
+            // NVENC takes CUDA frames: v210 becomes NV12 on the GPU instead of being
+            // unpacked and converted on the CPU.
+            if (cudaconvert::available() && gpuFrames == nullptr)
+            {
+                gpuFrames = cudaFramePool(config_.target.width, config_.target.height);
+            }
+            if (gpuFrames != nullptr)
+            {
+                videoEnc->pix_fmt = AV_PIX_FMT_CUDA;
+                videoEnc->hw_frames_ctx = av_buffer_ref(gpuFrames);
+            }
         }
         else if (name == "libx264")
         {
@@ -1839,17 +1955,19 @@ void EgressPipeline::run()
             graph = avfilter_graph_alloc();
             auto plan = planAdaptation(source, config_.target, config_.deinterlacer, config_.aspect, config_.scale, "auto");
             std::string desc = ffmpegFilter(plan, false);
+            // NVENC with CUDA input takes NV12 (uploaded below); the CPU encoders take yuv420p.
+            bool const toNv12 = videoEnc != nullptr && videoEnc->hw_frames_ctx != nullptr;
             auto const marker = desc.rfind("format=yuv422p10le");
             if (marker != std::string::npos)
             {
-                desc.replace(marker, std::string("format=yuv422p10le").size(), "format=yuv420p");
+                desc.replace(marker, std::string("format=yuv422p10le").size(), toNv12 ? "format=nv12" : "format=yuv420p");
             }
             char args[256];
             std::snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1", source.width, source.height, AV_PIX_FMT_YUV422P10LE,
                 config_.target.rate.den, config_.target.rate.num);
             avfilter_graph_create_filter(&sourceFilter, avfilter_get_by_name("buffer"), "in", args, nullptr, graph);
             avfilter_graph_create_filter(&sinkFilter, avfilter_get_by_name("buffersink"), "out", nullptr, nullptr, graph);
-            enum AVPixelFormat const pixfmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+            enum AVPixelFormat const pixfmts[] = {toNv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
             av_opt_set_int_list(sinkFilter, "pix_fmts", pixfmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
             AVFilterInOut* outputs = avfilter_inout_alloc();
             AVFilterInOut* inputs = avfilter_inout_alloc();
@@ -1865,18 +1983,53 @@ void EgressPipeline::run()
             }
             graphSource = source;
         }
-        AVFrame* raw = unpackV210(picture.data(), static_cast<int>(picture.size()), source.width, source.height);
-        if (raw == nullptr)
-        {
-            raw = av_frame_alloc();
-            raw->format = AV_PIX_FMT_YUV422P10LE;
-            raw->width = source.width;
-            raw->height = source.height;
-            av_frame_get_buffer(raw, 0);
-        }
-        raw->pts = videoPts;
+        bool const gpuInput = videoEnc != nullptr && videoEnc->hw_frames_ctx != nullptr;
+        bool const sameRaster = source.width == config_.target.width && source.height == config_.target.height &&
+                                source.interlaced == config_.target.interlaced && (!source.interlaced || source.fieldOrder == config_.target.fieldOrder);
         AVFrame* encoded = av_frame_alloc();
-        if (graph != nullptr && av_buffersrc_add_frame(sourceFilter, raw) >= 0 && av_buffersink_get_frame(sinkFilter, encoded) >= 0)
+        AVFrame* raw = nullptr;
+        bool haveFrame = false;
+        if (gpuInput && sameRaster && !gpuConvertFailed)
+        {
+            // Nothing to adapt: v210 straight to an NV12 frame on the GPU.
+            haveFrame = av_hwframe_get_buffer(videoEnc->hw_frames_ctx, encoded, 0) >= 0 &&
+                        cudaconvert::toNv12(picture.data(), source.width, source.height, source.interlaced, encoded);
+            if (!haveFrame)
+            {
+                // From now on convert on the CPU and upload, as for an adapted raster.
+                log::error("gpu_nv12_failed", {{"channel", config_.id}});
+                gpuConvertFailed = true;
+                av_frame_unref(encoded);
+            }
+        }
+        if (!haveFrame)
+        {
+            raw = unpackV210(picture.data(), static_cast<int>(picture.size()), source.width, source.height);
+            if (raw == nullptr)
+            {
+                raw = av_frame_alloc();
+                raw->format = AV_PIX_FMT_YUV422P10LE;
+                raw->width = source.width;
+                raw->height = source.height;
+                av_frame_get_buffer(raw, 0);
+            }
+            raw->pts = videoPts;
+            AVFrame* adapted = av_frame_alloc();
+            if (graph != nullptr && av_buffersrc_add_frame(sourceFilter, raw) >= 0 && av_buffersink_get_frame(sinkFilter, adapted) >= 0)
+            {
+                if (gpuInput)
+                {
+                    haveFrame = av_hwframe_get_buffer(videoEnc->hw_frames_ctx, encoded, 0) >= 0 && av_hwframe_transfer_data(encoded, adapted, 0) >= 0;
+                }
+                else
+                {
+                    av_frame_move_ref(encoded, adapted);
+                    haveFrame = true;
+                }
+            }
+            av_frame_free(&adapted);
+        }
+        if (haveFrame)
         {
             encoded->pts = videoPts;
             if (needKeyframe && primary.connected())

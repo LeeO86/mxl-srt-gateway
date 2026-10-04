@@ -76,3 +76,36 @@ readings jump between about 35 and 55 fps while the output stays at 50 fps.
 
 Not run here: end-to-end latency with the A/V sync pattern (item 3), 4:2:2 or
 10-bit sources, interlaced H.264 encode.
+
+## Lab run 2026-10-04: GPU v210 conversion (1.1.0)
+
+Same host, GPUs and method as above. 1.0.1 against 1.1.0, built from this
+repository, measured one after the other the same day.
+
+Round trip, egress gateway as the source (the frame-sync counters are a quality
+measure here), 40 s:
+
+| Channels | Image | Encode fps (avg) | Decode fps (avg) | Frame sync repeats / drops | CPU ingest / egress | NVENC load |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 1.0.1 | 46.8 | 44.7 | 1191 / 517 | 7.4 / 7.8 cores | 77 % |
+| 8 | 1.1.0 | 49.6 | 48.5 | 0 / 0 | 2.2 / 2.5 cores | 90 % |
+| 12 | 1.0.1 | 32.3 | 26.5 | 1471 / 2883 | 10.4 / 11.4 cores | 77 % |
+| 12 | 1.1.0 | 37.4 | 35.9 | 5869 / 1434 | 3.1 / 3.1 cores | 100 % |
+
+From 10 channels NVENC is the limit (one engine per A16 GPU), with either image.
+
+Ingest only (`ffmpeg -re -c copy` senders as above; CPU, not quality):
+
+| Channels | 1.0.1 ingest CPU | 1.1.0 ingest CPU | NVDEC load (1.1.0) |
+| --- | --- | --- | --- |
+| 8 | 7.3 cores | 2.4 cores | 28 % |
+| 16 | 21.9 cores | 6.7 cores | 62 % |
+| 24 | 28.2 cores | 14.5 cores | 68 % |
+
+1.1.0 downloads the packed v210 (5.5 MB per frame) instead of NV12 (3.1 MB).
+Through pageable memory that did not fit the A16's x4 link at 16 channels (the
+frame-sync counters went from about 1 to about 10 per second per channel); the
+copies now go through page-locked memory and 16 channels are back at about 1.
+24 channels need 6.6 GB/s of download, more than the x4 link carries; a target
+GPU on x16 has about four times the bandwidth.
+

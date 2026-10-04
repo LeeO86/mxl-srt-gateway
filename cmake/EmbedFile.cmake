@@ -1,12 +1,15 @@
 # Embeds a file into a C++ header as a byte array.
-# Usage: cmake -DINPUT=<file> -DOUTPUT=<header> -DVAR=<name> -P EmbedFile.cmake
+# Usage: cmake -DINPUT=<file> -DOUTPUT=<header> -DVAR=<name> [-DNAMESPACE=<ns>] -P EmbedFile.cmake
+if(NOT NAMESPACE)
+    set(NAMESPACE "srtgw::webui")
+endif()
 file(READ "${INPUT}" content HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," bytes "${content}")
 file(WRITE "${OUTPUT}" "// Generated from ${INPUT} — do not edit.
 #pragma once
 #include <string_view>
 
-namespace srtgw::webui
+namespace ${NAMESPACE}
 {
 inline constexpr unsigned char k${VAR}[] = {${bytes}};
 

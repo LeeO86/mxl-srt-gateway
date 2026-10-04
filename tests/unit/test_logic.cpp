@@ -273,6 +273,19 @@ TEST_CASE("adaptation matrix covers the specification rows")
 
     auto const forced = planAdaptation(p50, p50, "bwdif", "letterbox", "bicubic", "tff");
     CHECK(forced.deint != Deint::None);
+
+    // keepCuda: a chain that runs on the GPU end to end stays there; one that needs a
+    // CPU step still downloads and ends in yuv422p10le.
+    auto const same = planAdaptation(p50, p50, "bwdif", "letterbox", "bicubic", "auto");
+    CHECK(ffmpegFilter(same, true, true) == "null");
+    CHECK(ffmpegFilter(same, true).find("hwdownload") != std::string::npos);
+    auto const fieldKept = ffmpegFilter(field, true, true);
+    CHECK(fieldKept.find("bwdif_cuda=mode=send_field") != std::string::npos);
+    CHECK(fieldKept.find("hwdownload") == std::string::npos);
+    CHECK(fieldKept.find("format=yuv422p10le") == std::string::npos);
+    auto const scaledKept = ffmpegFilter(scaled, true, true);
+    CHECK(scaledKept.find("hwdownload") < scaledKept.find("crop=1280:720"));
+    CHECK(scaledKept.find("format=yuv422p10le") != std::string::npos);
 }
 
 TEST_CASE("frame synchroniser repeats, drops one at a time, and holds")
