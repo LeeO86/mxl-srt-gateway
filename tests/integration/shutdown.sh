@@ -70,6 +70,31 @@ stop_and_check() {
 
 echo '{"channels":[]}' > "$WORK/config.json"
 mkdir -p "$WORK/mxl" "$WORK/state"
+
+# A busy NMOS port exits 75, like a busy web port.
+python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("0.0.0.0", int(sys.argv[1]))); s.listen(); time.sleep(30)' "$NMOS_PORT" &
+BLOCKER=$!
+sleep 0.5
+start_gateway
+set +e
+timeout 20 tail --pid="$GW" -f /dev/null
+kill -0 "$GW" 2>/dev/null && kill -KILL "$GW"
+wait "$GW"
+code=$?
+set -e
+GW=""
+kill "$BLOCKER" 2>/dev/null || true
+wait "$BLOCKER" 2>/dev/null || true
+if [[ "$code" != 75 ]]; then
+  echo "expected exit 75 with the NMOS port in use, got $code" >&2
+  cat "$WORK/gw.log" >&2 || true
+  exit 1
+fi
+echo "busy NMOS port exits 75"
+: > "$WORK/gw.log"
+rm -rf "$WORK/mxl/own"
+
 start_gateway
 if ! wait_ready 20; then
   echo "gateway did not become ready without a registry" >&2

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- A busy `NMOS_PORT` exits 75, like a busy web port. nmos-cpp swallows listener errors, so the gateway now checks that it really listens on the port after the node started (`/proc/net/tcp{,6}` and its own sockets), as the ST 2110 gateway does. Before, it ran on without IS-04/IS-05; a start error it did see was only logged (`nmos_start_failed`).
+
 ## 1.1.0
 
 Measured on the lab A16 ([docs/hardware.md](docs/hardware.md)): 8 channels through egress and ingest now keep 50 fps with no frame-sync repeat or drop, at 2.2 / 2.5 cores instead of 7.4 / 7.8; 16 ingest channels take 6.7 cores instead of 21.9.
