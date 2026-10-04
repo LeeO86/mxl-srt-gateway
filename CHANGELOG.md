@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- NVDEC ingest: when every adaptation step runs on CUDA, the decoded frame stays on the GPU and is packed to v210 there; only the packed picture is downloaded. Before, each frame was downloaded as 4:2:0, converted to 10-bit 4:2:2 and packed to v210 on the CPU.
+- NVENC egress: v210 becomes an NV12 CUDA frame on the GPU when the raster needs no adaptation; otherwise the CPU-adapted frame is uploaded as NV12. Before, NVENC got CPU frames in yuv420p.
+- All channels share the GPU's primary CUDA context instead of one context per connection.
+- The v210 encoder and decoder contexts are kept per thread instead of being opened for every frame, and the ingest writer shares each decoded picture instead of copying it per output grain.
+- The kernels are compiled to PTX by Clang (like FFmpeg's `--enable-cuda-llvm` filters) and loaded through the driver at runtime. Without clang or the ffnvcodec headers at build time, or without a driver at runtime, the CPU path is used; a failed GPU conversion logs `gpu_v210_failed` or `gpu_nv12_failed` and the channel continues on the CPU.
+
 ## 1.0.1
 
 - An ingest channel that fell more than the frame queue (8 frames) behind
