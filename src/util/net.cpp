@@ -11,13 +11,8 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <cerrno>
-#include <filesystem>
-#include <fstream>
-#include <set>
-#include <sstream>
 
 namespace srtgw
 {
@@ -300,44 +295,29 @@ std::int64_t monoNowMs()
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool processListensOn(int port)
+bool tcpBindAvailable(int port, std::string* error)
 {
-    std::set<std::string> inodes;
-    for (auto const* table : {"/proc/net/tcp", "/proc/net/tcp6"})
+    int const fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
     {
-        std::ifstream in(table);
-        std::string line;
-        std::getline(in, line);
-        while (std::getline(in, line))
+        if (error != nullptr)
         {
-            // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
-            std::istringstream fields(line);
-            std::string sl, local, remote, state, queues, timer, retransmit, uid, timeout, inode;
-            if (!(fields >> sl >> local >> remote >> state >> queues >> timer >> retransmit >> uid >> timeout >> inode) || state != "0A")
-            {
-                continue;
-            }
-            auto const colon = local.rfind(':');
-            if (colon != std::string::npos && std::strtol(local.substr(colon + 1).c_str(), nullptr, 16) == port)
-            {
-                inodes.insert(inode);
-            }
+            *error = "socket failed";
         }
-    }
-    if (inodes.empty())
-    {
         return false;
     }
-    std::error_code ec;
-    for (auto const& entry : std::filesystem::directory_iterator("/proc/self/fd", ec))
+    int const yes = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bool const ok = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    if (!ok && error != nullptr)
     {
-        std::error_code linkError;
-        auto const target = std::filesystem::read_symlink(entry.path(), linkError).string();
-        if (!linkError && target.rfind("socket:[", 0) == 0 && target.size() > 9 && inodes.count(target.substr(8, target.size() - 9)) != 0)
-        {
-            return true;
-        }
+        *error = std::strerror(errno);
     }
-    return false;
+    ::close(fd);
+    return ok;
 }
 } // namespace srtgw

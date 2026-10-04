@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+
+- A busy `NMOS_PORT` or `NMOS_PORT`+1 exits 75 again within a second. 1.1.1 noticed the failed listener only after nmos-cpp had started, and stopping that server hung: on the lab host the process neither exited nor served (killed after 9 minutes). The ports are now bound and released once before the node starts. The CI test passed with 1.1.1; the lab host showed the hang.
+
 ## 1.1.1
 
 - A busy `NMOS_PORT` exits 75, like a busy web port. nmos-cpp swallows listener errors, so the gateway now checks that it really listens on the port after the node started (`/proc/net/tcp{,6}` and its own sockets), as the ST 2110 gateway does. Before, it ran on without IS-04/IS-05; a start error it did see was only logged (`nmos_start_failed`).

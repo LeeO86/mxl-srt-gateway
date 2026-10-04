@@ -207,6 +207,17 @@ void applyPlatformTags(nmos::resource& resource, std::string const& tagsJson)
 
 void NmosNode::start()
 {
+    // nmos-cpp (fe30384, server.cpp open_listeners) swallows listener errors, and a
+    // server whose listener failed did not shut down (1.1.1 hung on a busy port).
+    // Check the node's ports before anything starts.
+    for (int const port : {impl_->config.nmosPort, impl_->config.nmosPort + 1})
+    {
+        std::string bindError;
+        if (!tcpBindAvailable(port, &bindError))
+        {
+            throw std::runtime_error("port " + std::to_string(port) + " cannot be bound: " + bindError);
+        }
+    }
     impl_->thread = std::thread([this] {
         nmos::experimental::log_model logModel;
         std::ostream errorLog(std::cerr.rdbuf());
@@ -491,13 +502,6 @@ void NmosNode::start()
     if (!impl_->error.empty())
     {
         throw std::runtime_error(impl_->error);
-    }
-    // nmos-cpp fe30384 (server.cpp open_listeners) swallows listener errors, so a
-    // busy port opens "successfully". Check that this process really listens.
-    if (impl_->running.load() && !processListensOn(impl_->config.nmosPort))
-    {
-        stop();
-        throw std::runtime_error("NMOS_PORT " + std::to_string(impl_->config.nmosPort) + " is in use or cannot be bound");
     }
 }
 
