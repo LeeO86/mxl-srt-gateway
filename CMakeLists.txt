@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-srt-gateway
-    VERSION 1.0.1
+    VERSION 1.1.0
     DESCRIPTION "SRT contribution gateway for MXL"
     LANGUAGES CXX
 )
