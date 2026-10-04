@@ -34,7 +34,7 @@ open fails, the channel enters `error` with that reason.
 Not one of the target GPUs. The A16 is four GA107 GPUs (one NVENC, two NVDEC
 engines each, PCIe Gen4 x4 per GPU); each gateway used one GPU. Host: 2× Xeon
 Gold 6136, driver 595.84, image built from this repository with the fixes in
-the CHANGELOG `Unreleased` section (1.0.0 itself left ingest channels on the
+the CHANGELOG 1.0.1 section (1.0.0 itself left ingest channels on the
 slate after a stall and fell back to CPU decode from about 13 channels).
 
 Egress: N channels read 1080p50 v210 flows from mxl-test-player (colour bars

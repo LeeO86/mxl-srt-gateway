@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - An ingest channel that fell more than the frame queue (8 frames) behind
   the decoder wrote the loss slate forever while it reported `running`, and
