@@ -12,7 +12,7 @@ Measured on the lab host without a GPU ([docs/hardware.md](docs/hardware.md), 10
 - The ingest's packed pictures (GPU path and adapted CPU path) come from a pool instead of a new allocation per frame; egress reads grains in place on the GPU path too.
 - Interlaced MXL flows: MXL doubles an interlaced flow's declared `grain_rate` and each grain holds one field. Ingest now writes frame k as grains 2k (first field: the top one when `tff`) and 2k + 1; egress weaves frame k from those two grains. Before, ingest wrote half a frame into each field grain and a 1080i egress only ever sent its slate. Checked on the lab with black top and white bottom fields through ingest → egress → ingest, CPU and GPU.
 - Interlaced egress tells libx264 the field order on every frame; the stream said bottom field first before.
-- Egress takes the source grain `read_offset_grains` before the output grain's time (MXL grains are indexed by time) instead of the newest grain minus the offset; it still follows a source that runs later than that. The newest grain moved between n−1 and n depending on whether the writer's commit came just before or after the egress tick: 10–24 repeat/drop pairs per channel and 45 s on the lab (1.1.2 too), now 0.
+- Egress takes the source grain `read_offset_grains` before the output grain's time (MXL grains are indexed by time) instead of the newest grain minus the offset; it still follows a source that runs later than that. The newest grain moved between n−1 and n depending on whether the writer's commit came just before or after the egress tick: with 1.1.2, 4–10 repeat/drop pairs per channel in 45 s on the lab, now 0.
 
 ## 1.1.2
 
