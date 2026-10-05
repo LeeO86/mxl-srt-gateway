@@ -277,7 +277,7 @@ corporate firewall. Therefore:
 - Video codecs: H.264 (default), HEVC. `ENCODER=auto|nvenc|cpu`. Settings: CBR
   bitrate (default 15 Mbit/s 1080p50), GOP length (default 1 s), B-frames
   (default 0 for low latency), profile/level, NVENC preset and tuning
-  (`ll`/`ull`), x264 preset and `zerolatency`. Interlaced encoding only where the
+  (`ll`/`ull`), x264 preset, `zerolatency` and thread count. Interlaced encoding only where the
   encoder supports it (detect at start; otherwise refuse that configuration with
   a clear error).
 - Audio (multichannel, v1 requirement): up to **16 tracks**, each its own PID with

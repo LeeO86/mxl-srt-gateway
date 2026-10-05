@@ -287,18 +287,18 @@ struct V210Codec
     }
 };
 
-std::vector<std::uint8_t> packV210(AVFrame* frame)
+void packV210(AVFrame* frame, std::vector<std::uint8_t>& packed)
 {
-    std::vector<std::uint8_t> packed;
+    packed.clear();
     if (frame == nullptr)
     {
-        return packed;
+        return;
     }
     thread_local V210Codec encoder;
     AVCodecContext* ctx = encoder.get(true, frame->width, frame->height);
     if (ctx == nullptr)
     {
-        return packed;
+        return;
     }
     AVPacket* packet = av_packet_alloc();
     if (avcodec_send_frame(ctx, frame) >= 0 && avcodec_receive_packet(ctx, packet) >= 0)
@@ -306,8 +306,40 @@ std::vector<std::uint8_t> packV210(AVFrame* frame)
         packed.assign(packet->data, packet->data + packet->size);
     }
     av_packet_free(&packet);
-    return packed;
 }
+
+// Picture buffers for the writer thread: a buffer comes back here when its last reference
+// goes, so a frame does not allocate (and page-fault) megabytes afresh.
+class BufferPool : public std::enable_shared_from_this<BufferPool>
+{
+public:
+    // A buffer of any size (its last use's); the caller sizes or assigns it.
+    std::shared_ptr<std::vector<std::uint8_t>> acquire()
+    {
+        std::vector<std::uint8_t>* buffer = nullptr;
+        {
+            std::lock_guard const lock{mu_};
+            if (!free_.empty())
+            {
+                buffer = free_.back().release();
+                free_.pop_back();
+            }
+        }
+        if (buffer == nullptr)
+        {
+            buffer = new std::vector<std::uint8_t>();
+        }
+        auto self = shared_from_this();
+        return std::shared_ptr<std::vector<std::uint8_t>>(buffer, [self](std::vector<std::uint8_t>* done) {
+            std::lock_guard const lock{self->mu_};
+            self->free_.emplace_back(done);
+        });
+    }
+
+private:
+    std::mutex mu_;
+    std::vector<std::unique_ptr<std::vector<std::uint8_t>>> free_;
+};
 
 AVFrame* unpackV210(std::uint8_t const* data, int size, int width, int height)
 {
@@ -504,6 +536,9 @@ struct IngestPipeline::Shared
     {
         // Shared: the writer takes a frame per output grain without copying the picture.
         std::shared_ptr<std::vector<std::uint8_t> const> bytes;
+        // Or the decoded 8-bit 4:2:0 picture, which the writer packs straight into the grain.
+        std::shared_ptr<AVFrame const> yuv;
+        bool interlaced = false;
         std::int64_t ptsNs = 0;
         std::int64_t index = 0;
         std::string timecode;
@@ -919,6 +954,10 @@ void IngestPipeline::runIo()
         VideoFormat filteredSource;
         bool haveGraph = false;
         bool graphCuda = false;
+        // Nothing to adapt and the decoder gives 8-bit 4:2:0: the graph is skipped and the
+        // writer packs the decoded picture straight into the grain.
+        bool directPack = false;
+        auto const pool = std::make_shared<BufferPool>();
         // The graph ends on the GPU and its frames are packed to v210 there.
         bool graphOnGpu = false;
         bool outputInterlaced = false;
@@ -1051,6 +1090,8 @@ void IngestPipeline::runIo()
                             }
                             av_frame_free(&probe);
                             haveGraph = built;
+                            directPack = built && !graphCuda && frame->format == AV_PIX_FMT_YUV420P && frame->color_range != AVCOL_RANGE_JPEG &&
+                                         ffmpegFilter(plan, false) == "format=yuv422p10le";
                             filteredSource = detected;
                             std::lock_guard const lock{shared_->mediaMu};
                             shared_->source = detected;
@@ -1073,7 +1114,66 @@ void IngestPipeline::runIo()
                                 input = nullptr;
                             }
                         }
-                        if (haveGraph && input != nullptr)
+                        // A converted picture to the writer thread, stamped on the TAI clock.
+                        auto const publishPicture = [&](AVFrame const* picture, std::int64_t ptsNs, std::shared_ptr<std::vector<std::uint8_t> const> bytes,
+                                                        std::shared_ptr<AVFrame const> yuv) {
+                            double const now = static_cast<double>(taiNowNs());
+                            double const sample = now - static_cast<double>(ptsNs);
+                            if (!haveOffset)
+                            {
+                                offset = sample;
+                                haveOffset = true;
+                            }
+                            else
+                            {
+                                offset = offset * 0.98 + sample * 0.02;
+                            }
+                            IngestPipeline::Shared::Frame adapted;
+                            adapted.width = picture->width;
+                            adapted.height = picture->height;
+                            adapted.ptsNs = ptsNs + static_cast<std::int64_t>(offset);
+                            adapted.index = frameIndex++;
+                            adapted.bytes = std::move(bytes);
+                            adapted.yuv = std::move(yuv);
+                            adapted.interlaced = outputInterlaced;
+                            if (AVFrameSideData* side = av_frame_get_side_data(picture, AV_FRAME_DATA_S12M_TIMECODE))
+                            {
+                                if (side->size >= 16)
+                                {
+                                    adapted.timecode = "sei";
+                                }
+                            }
+                            {
+                                std::lock_guard const lock{shared_->mediaMu};
+                                shared_->frames.push_back(std::move(adapted));
+                                while (shared_->frames.size() > 8)
+                                {
+                                    shared_->frames.pop_front();
+                                }
+                                shared_->decoded++;
+                                auto const nowMs = monoNowMs();
+                                if (shared_->decodeWindowMs == 0)
+                                {
+                                    shared_->decodeWindowMs = nowMs;
+                                }
+                                shared_->decodeWindowFrames++;
+                                if (nowMs - shared_->decodeWindowMs >= 1000)
+                                {
+                                    shared_->decodeWindowMs = nowMs;
+                                    shared_->decodeWindowFrames = 0;
+                                }
+                            }
+                        };
+                        if (haveGraph && directPack && input == frame && frame->format == AV_PIX_FMT_YUV420P && frame->width == filteredSource.width &&
+                            frame->height == filteredSource.height)
+                        {
+                            std::shared_ptr<AVFrame const> const yuv(av_frame_clone(frame), [](AVFrame const* done) {
+                                auto* f = const_cast<AVFrame*>(done);
+                                av_frame_free(&f);
+                            });
+                            publishPicture(frame, av_rescale_q(frame->pts, fmt->streams[videoStream]->time_base, AVRational{1, 1000000000}), nullptr, yuv);
+                        }
+                        else if (haveGraph && input != nullptr)
                         {
                             input->pts = frame->pts;
                             if (av_buffersrc_add_frame_flags(sourceFilter, input, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0)
@@ -1081,68 +1181,23 @@ void IngestPipeline::runIo()
                                 while (av_buffersink_get_frame(sinkFilter, filtered) >= 0)
                                 {
                                     std::int64_t const ptsNs = av_rescale_q(filtered->pts, av_buffersink_get_time_base(sinkFilter), AVRational{1, 1000000000});
-                                    double const now = static_cast<double>(taiNowNs());
-                                    double const sample = now - static_cast<double>(ptsNs);
-                                    if (!haveOffset)
-                                    {
-                                        offset = sample;
-                                        haveOffset = true;
-                                    }
-                                    else
-                                    {
-                                        offset = offset * 0.98 + sample * 0.02;
-                                    }
-                                    IngestPipeline::Shared::Frame adapted;
-                                    adapted.width = filtered->width;
-                                    adapted.height = filtered->height;
-                                    adapted.ptsNs = ptsNs + static_cast<std::int64_t>(offset);
-                                    adapted.index = frameIndex++;
+                                    auto packed = pool->acquire();
                                     if (graphOnGpu)
                                     {
-                                        auto packed = std::make_shared<std::vector<std::uint8_t>>();
-                                        if (cudaconvert::toV210(filtered, outputInterlaced, *packed))
-                                        {
-                                            adapted.bytes = std::move(packed);
-                                        }
-                                        else
+                                        if (!cudaconvert::toV210(filtered, outputInterlaced, *packed))
                                         {
                                             // Rebuild on the next frame with the CPU conversion.
                                             log::error("gpu_v210_failed", {{"channel", config_.id}});
                                             gpuPackFailed = true;
                                             filteredSource = VideoFormat{};
+                                            packed.reset();
                                         }
                                     }
                                     else
                                     {
-                                        adapted.bytes = std::make_shared<std::vector<std::uint8_t> const>(packV210(filtered));
+                                        packV210(filtered, *packed);
                                     }
-                                    if (AVFrameSideData* side = av_frame_get_side_data(filtered, AV_FRAME_DATA_S12M_TIMECODE))
-                                    {
-                                        if (side->size >= 16)
-                                        {
-                                            adapted.timecode = "sei";
-                                        }
-                                    }
-                                    {
-                                        std::lock_guard const lock{shared_->mediaMu};
-                                        shared_->frames.push_back(std::move(adapted));
-                                        while (shared_->frames.size() > 8)
-                                        {
-                                            shared_->frames.pop_front();
-                                        }
-                                        shared_->decoded++;
-                                        auto const nowMs = monoNowMs();
-                                        if (shared_->decodeWindowMs == 0)
-                                        {
-                                            shared_->decodeWindowMs = nowMs;
-                                        }
-                                        shared_->decodeWindowFrames++;
-                                        if (nowMs - shared_->decodeWindowMs >= 1000)
-                                        {
-                                            shared_->decodeWindowMs = nowMs;
-                                            shared_->decodeWindowFrames = 0;
-                                        }
-                                    }
+                                    publishPicture(filtered, ptsNs, std::move(packed), nullptr);
                                     av_frame_unref(filtered);
                                 }
                             }
@@ -1347,18 +1402,32 @@ void IngestPipeline::runClock()
             std::lock_guard const lock{shared_->mediaMu};
             for (auto const& frame : shared_->frames)
             {
-                if (frame.index == decision.sourceIndex && frame.bytes)
+                if (frame.index == decision.sourceIndex && (frame.bytes || frame.yuv))
                 {
                     chosen = frame;
                     haveChosen = true;
                     timecode = frame.timecode;
-                    picture = chosen.bytes->data();
-                    pictureSize = chosen.bytes->size();
+                    if (chosen.bytes)
+                    {
+                        picture = chosen.bytes->data();
+                        pictureSize = chosen.bytes->size();
+                    }
                     break;
                 }
             }
         }
-        if (video)
+        if (video && haveChosen && chosen.yuv && chosen.yuv->width == config_.target.width && chosen.yuv->height == config_.target.height)
+        {
+            AVFrame const* f = chosen.yuv.get();
+            video->writeWith(index, [&](std::uint8_t* grain, std::size_t size) {
+                if (size >= v210Size(f->width, f->height))
+                {
+                    yuv420ToV210(f->data[0], f->linesize[0], f->data[1], f->data[2], f->linesize[1], f->width, f->height, chosen.interlaced, grain,
+                        v210Stride(f->width));
+                }
+            });
+        }
+        else if (video)
         {
             video->write(index, picture, pictureSize, false);
         }
@@ -1445,7 +1514,15 @@ void IngestPipeline::runClock()
         ++frames;
         if (monoNowMs() - lastJpeg > 1000 && haveChosen)
         {
-            auto jpeg = encodeJpeg(chosen.bytes->data(), chosen.width, chosen.height);
+            std::vector<std::uint8_t> packed;
+            if (chosen.yuv)
+            {
+                AVFrame const* f = chosen.yuv.get();
+                packed.resize(v210Size(f->width, f->height));
+                yuv420ToV210(f->data[0], f->linesize[0], f->data[1], f->data[2], f->linesize[1], f->width, f->height, chosen.interlaced, packed.data(),
+                    v210Stride(f->width));
+            }
+            auto jpeg = encodeJpeg(chosen.yuv ? packed.data() : chosen.bytes->data(), chosen.width, chosen.height);
             std::lock_guard const lock{statusMu_};
             status_.jpeg = std::move(jpeg);
             lastJpeg = monoNowMs();
@@ -1594,6 +1671,9 @@ void EgressPipeline::run()
     AVFilterContext* sourceFilter = nullptr;
     AVFilterContext* sinkFilter = nullptr;
     VideoFormat graphSource;
+    // The graph only converts the pixel format: v210 goes straight into `yuv` instead.
+    bool plainGraph = false;
+    AVFrame* yuv = nullptr;
     std::vector<AVCodecContext*> audioEnc;
     AVFormatContext* mux = nullptr;
     AVIOContext* avio = nullptr;
@@ -1629,6 +1709,7 @@ void EgressPipeline::run()
         avcodec_free_context(&videoEnc);
         av_buffer_unref(&gpuFrames);
         avfilter_graph_free(&graph);
+        av_frame_free(&yuv);
     };
 
     auto ensureEncoder = [&](std::string* error) {
@@ -1702,6 +1783,10 @@ void EgressPipeline::run()
         }
         else if (name == "libx264")
         {
+            if (config_.egress.threads > 0)
+            {
+                videoEnc->thread_count = config_.egress.threads;
+            }
             av_opt_set(videoEnc->priv_data, "preset", config_.egress.preset.c_str(), 0);
             av_opt_set(videoEnc->priv_data, "tune", config_.egress.tune.c_str(), 0);
             av_opt_set(videoEnc->priv_data, "nal-hrd", config_.egress.mux == "cbr" ? "cbr" : "none", 0);
@@ -1736,6 +1821,10 @@ void EgressPipeline::run()
                     videoEnc->rc_buffer_size = config_.egress.bitrate;
                     videoEnc->gop_size = std::max(1, static_cast<int>(std::llround(config_.target.rate.hz() * config_.egress.gopSeconds)));
                     videoEnc->max_b_frames = 0;
+                    if (name == "libx264" && config_.egress.threads > 0)
+                    {
+                        videoEnc->thread_count = config_.egress.threads;
+                    }
                     av_opt_set(videoEnc->priv_data, "preset", name == "libx264" ? config_.egress.preset.c_str() : "ultrafast", 0);
                     av_opt_set(videoEnc->priv_data, "tune", name == "libx264" ? config_.egress.tune.c_str() : "zerolatency", 0);
                     if (avcodec_open2(videoEnc, codec, nullptr) < 0)
@@ -1872,7 +1961,8 @@ void EgressPipeline::run()
         auto const videoRoute = routes_(true);
         auto const audioRoute = routes_(false);
         std::string state = "waiting";
-        std::vector<std::uint8_t> picture = slateFrame;
+        std::uint8_t const* picture = slateFrame.data();
+        std::size_t pictureSize = slateFrame.size();
         VideoFormat source = config_.target;
         bool live = false;
         if (videoRoute.active && !videoRoute.flowId.empty())
@@ -1912,10 +2002,14 @@ void EgressPipeline::run()
                         sync->waitFor(grainTimeNs(source.rate, srcIndex), 40000000);
                     }
                     bool invalid = false;
-                    std::vector<std::uint8_t> payload;
-                    if (videoReader.read(srcIndex, 40000000, payload, &invalid) && !invalid)
+                    std::uint8_t const* grain = nullptr;
+                    std::size_t grainSize = 0;
+                    // In place: the loop is done with the grain long before the writer comes
+                    // round to its slot again.
+                    if (videoReader.view(srcIndex, 40000000, &grain, &grainSize, &invalid) && !invalid)
                     {
-                        picture = std::move(payload);
+                        picture = grain;
+                        pictureSize = grainSize;
                         live = true;
                         state = "running";
                         if (haveSource && srcIndex > lastSource + 1)
@@ -1944,9 +2038,10 @@ void EgressPipeline::run()
         {
             state = videoRoute.active ? "no_signal" : "waiting";
         }
-        if (picture.size() != v210Size(source.width, source.height) && picture.size() != v210Size(config_.target.width, config_.target.height))
+        if (pictureSize != v210Size(source.width, source.height) && pictureSize != v210Size(config_.target.width, config_.target.height))
         {
-            picture = slateFrame;
+            picture = slateFrame.data();
+            pictureSize = slateFrame.size();
             source = config_.target;
         }
         if (graph == nullptr || source.width != graphSource.width || source.height != graphSource.height || source.interlaced != graphSource.interlaced)
@@ -1955,6 +2050,7 @@ void EgressPipeline::run()
             graph = avfilter_graph_alloc();
             auto plan = planAdaptation(source, config_.target, config_.deinterlacer, config_.aspect, config_.scale, "auto");
             std::string desc = ffmpegFilter(plan, false);
+            plainGraph = desc == "format=yuv422p10le";
             // NVENC with CUDA input takes NV12 (uploaded below); the CPU encoders take yuv420p.
             bool const toNv12 = videoEnc != nullptr && videoEnc->hw_frames_ctx != nullptr;
             auto const marker = desc.rfind("format=yuv422p10le");
@@ -1993,7 +2089,7 @@ void EgressPipeline::run()
         {
             // Nothing to adapt: v210 straight to an NV12 frame on the GPU.
             haveFrame = av_hwframe_get_buffer(videoEnc->hw_frames_ctx, encoded, 0) >= 0 &&
-                        cudaconvert::toNv12(picture.data(), source.width, source.height, source.interlaced, encoded);
+                        cudaconvert::toNv12(picture, source.width, source.height, source.interlaced, encoded);
             if (!haveFrame)
             {
                 // From now on convert on the CPU and upload, as for an adapted raster.
@@ -2002,9 +2098,32 @@ void EgressPipeline::run()
                 av_frame_unref(encoded);
             }
         }
+        if (!haveFrame && !gpuInput && plainGraph && videoEnc->pix_fmt == AV_PIX_FMT_YUV420P)
+        {
+            // Nothing to adapt: v210 straight into a 4:2:0 frame (x264 copies it, so the same
+            // buffer serves every frame), as the GPU path does.
+            if (yuv == nullptr || yuv->width != source.width || yuv->height != source.height)
+            {
+                av_frame_free(&yuv);
+                yuv = av_frame_alloc();
+                yuv->format = AV_PIX_FMT_YUV420P;
+                yuv->width = source.width;
+                yuv->height = source.height;
+                if (av_frame_get_buffer(yuv, 0) < 0)
+                {
+                    av_frame_free(&yuv);
+                }
+            }
+            if (yuv != nullptr && av_frame_make_writable(yuv) >= 0)
+            {
+                v210ToYuv420(picture, v210Stride(source.width), source.width, source.height, source.interlaced, yuv->data[0], yuv->linesize[0], yuv->data[1],
+                    yuv->data[2], yuv->linesize[1]);
+                haveFrame = av_frame_ref(encoded, yuv) >= 0;
+            }
+        }
         if (!haveFrame)
         {
-            raw = unpackV210(picture.data(), static_cast<int>(picture.size()), source.width, source.height);
+            raw = unpackV210(picture, static_cast<int>(pictureSize), source.width, source.height);
             if (raw == nullptr)
             {
                 raw = av_frame_alloc();
@@ -2168,7 +2287,7 @@ void EgressPipeline::run()
         status.request = publicRequest(config_, config_.announceAddress.empty() ? primaryIpv4() : config_.announceAddress);
         if (monoNowMs() % 1000 < 40)
         {
-            status.jpeg = encodeJpeg(picture.data(), source.width, source.height);
+            status.jpeg = encodeJpeg(picture, source.width, source.height);
         }
         {
             std::lock_guard const lock{statusMu_};

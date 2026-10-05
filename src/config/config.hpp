@@ -64,6 +64,7 @@ struct EgressSettings
     std::string level = "4.2";
     std::string preset = "veryfast";
     std::string tune = "zerolatency";
+    int threads = 0; // libx264 threads; 0 = x264's own choice
     std::string nvencPreset = "p4";
     std::string nvencTune = "ull";
     std::vector<EgressAudioTrack> audioTracks;

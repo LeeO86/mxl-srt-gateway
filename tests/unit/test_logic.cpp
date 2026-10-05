@@ -13,7 +13,9 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -131,6 +133,15 @@ TEST_CASE("a matrix patch keeps the channel label and the per-tap gains")
     CHECK(patched.egress.audioTracks[0].channels[0] == 4);
     CHECK(patched.egress.audioTracks[0].language == "ger");
     CHECK(patched.egress.codec == original.egress.codec);
+}
+
+TEST_CASE("the x264 thread count is kept and clamped")
+{
+    auto const channel = channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\",\"egress\":{\"threads\":4}}", nullptr);
+    CHECK(channel.egress.threads == 4);
+    CHECK(channelFromJson(channelToJson(channel, true), nullptr).egress.threads == 4);
+    CHECK(channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\",\"egress\":{\"threads\":500}}", nullptr).egress.threads == 64);
+    CHECK(channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\"}", nullptr).egress.threads == 0);
 }
 
 TEST_CASE("internet listener without a passphrase or streamid is rejected")
@@ -440,6 +451,10 @@ TEST_CASE("v210 stride and slate are sized for the raster")
 {
     CHECK(v210Stride(1920) == 5120);
     CHECK(v210Size(1920, 1080) == 5120U * 1080U);
+    // Rows padded to 48 pixels (128 bytes), as MXL lays them out.
+    CHECK(v210Stride(1280) == 3456);
+    CHECK(v210Stride(720) == 1920);
+    CHECK(v210Stride(3840) == 10240);
     auto const slate = renderSlate(320, 180, "CAM 1", true);
     CHECK(slate.size() == v210Size(320, 180));
     bool ink = false;
@@ -452,6 +467,192 @@ TEST_CASE("v210 stride and slate are sized for the raster")
         }
     }
     CHECK(ink);
+}
+
+namespace
+{
+// The CUDA kernels nv12ToV210 and v210ToNv12 (v210_cuda.cu), one 6-pixel group at a time, on
+// planar chroma: the reference for the CPU conversions.
+int refClamp(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void refChromaRows(int y, int chromaHeight, bool interlaced, int* near, int* far)
+{
+    if (interlaced)
+    {
+        int const field = y & 1;
+        int const fieldRow = y >> 1;
+        int const fieldChroma = (chromaHeight + 1 - field) / 2;
+        int const c = fieldRow >> 1;
+        int const other = (fieldRow & 1) ? c + 1 : c - 1;
+        *near = std::min(refClamp(c, 0, fieldChroma - 1) * 2 + field, chromaHeight - 1);
+        *far = std::min(refClamp(other, 0, fieldChroma - 1) * 2 + field, chromaHeight - 1);
+        return;
+    }
+    int const c = y >> 1;
+    *near = c;
+    *far = refClamp((y & 1) ? c + 1 : c - 1, 0, chromaHeight - 1);
+}
+
+std::uint8_t refTo8(std::uint32_t v)
+{
+    std::uint32_t const r = (v + 2) >> 2;
+    return static_cast<std::uint8_t>(r > 255 ? 255 : r);
+}
+
+std::vector<std::uint8_t> refToV210(std::vector<std::uint8_t> const& y, std::vector<std::uint8_t> const& cb, std::vector<std::uint8_t> const& cr, int width,
+    int height, bool interlaced)
+{
+    int const cw = (width + 1) / 2;
+    std::vector<std::uint8_t> out(v210Size(width, height));
+    for (int row = 0; row < height; ++row)
+    {
+        int near = 0;
+        int far = 0;
+        refChromaRows(row, (height + 1) / 2, interlaced, &near, &far);
+        for (int group = 0; group < (width + 5) / 6; ++group)
+        {
+            std::uint32_t ys[6];
+            std::uint32_t bs[3];
+            std::uint32_t rs[3];
+            for (int i = 0; i < 6; ++i)
+            {
+                ys[i] = static_cast<std::uint32_t>(y[static_cast<std::size_t>(row * width + refClamp(group * 6 + i, 0, width - 1))]) << 2;
+            }
+            for (int i = 0; i < 3; ++i)
+            {
+                int const cx = refClamp(group * 3 + i, 0, cw - 1);
+                bs[i] = ((3U * cb[static_cast<std::size_t>(near * cw + cx)] + cb[static_cast<std::size_t>(far * cw + cx)] + 2U) >> 2) << 2;
+                rs[i] = ((3U * cr[static_cast<std::size_t>(near * cw + cx)] + cr[static_cast<std::size_t>(far * cw + cx)] + 2U) >> 2) << 2;
+            }
+            std::uint32_t const w[4] = {bs[0] | (ys[0] << 10) | (rs[0] << 20), ys[1] | (bs[1] << 10) | (ys[2] << 20), rs[1] | (ys[3] << 10) | (bs[2] << 20),
+                ys[4] | (rs[2] << 10) | (ys[5] << 20)};
+            std::memcpy(out.data() + v210Stride(width) * static_cast<std::size_t>(row) + static_cast<std::size_t>(group) * 16U, w, sizeof(w));
+        }
+    }
+    return out;
+}
+
+void refToYuv420(std::vector<std::uint8_t> const& src, int width, int height, bool interlaced, std::vector<std::uint8_t>& y, std::vector<std::uint8_t>& cb,
+    std::vector<std::uint8_t>& cr)
+{
+    int const cw = (width + 1) / 2;
+    int const ch = (height + 1) / 2;
+    y.assign(static_cast<std::size_t>(width * height), 0);
+    cb.assign(static_cast<std::size_t>(cw * ch), 0);
+    cr.assign(cb.size(), 0);
+    auto word = [&](int row, int group, int k) {
+        std::uint32_t w = 0;
+        std::memcpy(&w, src.data() + v210Stride(width) * static_cast<std::size_t>(row) + static_cast<std::size_t>(group) * 16U + static_cast<std::size_t>(k) * 4U, 4);
+        return w;
+    };
+    for (int chromaRow = 0; chromaRow < ch; ++chromaRow)
+    {
+        for (int group = 0; group < (width + 5) / 6; ++group)
+        {
+            int rowA = 2 * chromaRow;
+            int rowB = rowA + 1;
+            if (interlaced)
+            {
+                int const field = chromaRow & 1;
+                int const fieldRow = (chromaRow >> 1) * 2;
+                rowA = (fieldRow * 2) + field;
+                rowB = rowA + 2;
+            }
+            rowA = refClamp(rowA, 0, height - 1);
+            rowB = refClamp(rowB, 0, height - 1);
+            std::uint32_t const cbA[3] = {word(rowA, group, 0) & 0x3ff, (word(rowA, group, 1) >> 10) & 0x3ff, (word(rowA, group, 2) >> 20) & 0x3ff};
+            std::uint32_t const crA[3] = {(word(rowA, group, 0) >> 20) & 0x3ff, word(rowA, group, 2) & 0x3ff, (word(rowA, group, 3) >> 10) & 0x3ff};
+            std::uint32_t const cbB[3] = {word(rowB, group, 0) & 0x3ff, (word(rowB, group, 1) >> 10) & 0x3ff, (word(rowB, group, 2) >> 20) & 0x3ff};
+            std::uint32_t const crB[3] = {(word(rowB, group, 0) >> 20) & 0x3ff, word(rowB, group, 2) & 0x3ff, (word(rowB, group, 3) >> 10) & 0x3ff};
+            for (int i = 0; i < 3; ++i)
+            {
+                int const cx = group * 3 + i;
+                if (2 * cx < width)
+                {
+                    cb[static_cast<std::size_t>(chromaRow * cw + cx)] = refTo8((cbA[i] + cbB[i] + 1) >> 1);
+                    cr[static_cast<std::size_t>(chromaRow * cw + cx)] = refTo8((crA[i] + crB[i] + 1) >> 1);
+                }
+            }
+            for (int row = 2 * chromaRow; row < 2 * chromaRow + 2 && row < height; ++row)
+            {
+                std::uint32_t const ys[6] = {(word(row, group, 0) >> 10) & 0x3ff, word(row, group, 1) & 0x3ff, (word(row, group, 1) >> 20) & 0x3ff,
+                    (word(row, group, 2) >> 10) & 0x3ff, word(row, group, 3) & 0x3ff, (word(row, group, 3) >> 20) & 0x3ff};
+                for (int i = 0; i < 6 && group * 6 + i < width; ++i)
+                {
+                    y[static_cast<std::size_t>(row * width + group * 6 + i)] = refTo8(ys[i]);
+                }
+            }
+        }
+    }
+}
+} // namespace
+
+TEST_CASE("v210 to and from 4:2:0 as the CUDA kernels do")
+{
+    std::uint32_t seed = 12345;
+    auto next = [&seed]() {
+        seed = seed * 1664525U + 1013904223U;
+        return seed >> 24;
+    };
+    struct Raster
+    {
+        int width;
+        int height;
+        bool interlaced;
+    };
+    std::vector<Raster> const rasters = {Raster{1920, 1080, false}, Raster{1920, 1080, true}, Raster{1280, 720, false}, Raster{718, 9, false},
+        Raster{718, 9, true}, Raster{8, 5, true}, Raster{6, 2, false}, Raster{14, 4, false}};
+    for (bool const simd : {true, false})
+    {
+        setV210Simd(simd);
+        for (Raster const& r : rasters)
+        {
+            CAPTURE(simd);
+            CAPTURE(r.width);
+            CAPTURE(r.height);
+            CAPTURE(r.interlaced);
+            int const cw = (r.width + 1) / 2;
+            int const ch = (r.height + 1) / 2;
+            std::vector<std::uint8_t> y(static_cast<std::size_t>(r.width * r.height));
+            std::vector<std::uint8_t> cb(static_cast<std::size_t>(cw * ch));
+            std::vector<std::uint8_t> cr(cb.size());
+            for (auto* plane : {&y, &cb, &cr})
+            {
+                for (auto& v : *plane)
+                {
+                    v = static_cast<std::uint8_t>(next());
+                }
+            }
+            std::vector<std::uint8_t> packed(v210Size(r.width, r.height));
+            yuv420ToV210(y.data(), r.width, cb.data(), cr.data(), cw, r.width, r.height, r.interlaced, packed.data(), v210Stride(r.width));
+            CHECK(packed == refToV210(y, cb, cr, r.width, r.height, r.interlaced));
+
+            // Back, from a v210 picture with every 10-bit code (not only multiples of 4).
+            for (auto& v : packed)
+            {
+                v = static_cast<std::uint8_t>(next());
+            }
+            for (std::size_t i = 3; i < packed.size(); i += 4)
+            {
+                packed[i] &= 0x3f; // bits 30 and 31 are unused
+            }
+            std::vector<std::uint8_t> y8(y.size());
+            std::vector<std::uint8_t> cb8(cb.size());
+            std::vector<std::uint8_t> cr8(cb.size());
+            v210ToYuv420(packed.data(), v210Stride(r.width), r.width, r.height, r.interlaced, y8.data(), r.width, cb8.data(), cr8.data(), cw);
+            std::vector<std::uint8_t> refY;
+            std::vector<std::uint8_t> refCb;
+            std::vector<std::uint8_t> refCr;
+            refToYuv420(packed, r.width, r.height, r.interlaced, refY, refCb, refCr);
+            CHECK(y8 == refY);
+            CHECK(cb8 == refCb);
+            CHECK(cr8 == refCr);
+        }
+    }
+    setV210Simd(true);
 }
 
 TEST_CASE("metrics render the channel set")

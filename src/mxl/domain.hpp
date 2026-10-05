@@ -3,6 +3,7 @@
 #include "media/format.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -63,6 +64,8 @@ public:
     MxlVideoWriter(MxlDomain& domain, std::string flowId, std::string label, std::string group, VideoFormat const& format);
     ~MxlVideoWriter();
     bool write(std::uint64_t index, std::uint8_t const* data, std::size_t size, bool invalid);
+    // Fills the grain in place: `fill` gets the payload and its size.
+    bool writeWith(std::uint64_t index, std::function<void(std::uint8_t*, std::size_t)> const& fill);
 
 private:
 #if SRTGW_WITH_MXL
@@ -95,6 +98,9 @@ public:
     [[nodiscard]] std::uint64_t head() const;
     [[nodiscard]] VideoFormat format() const;
     bool read(std::uint64_t index, std::uint64_t timeoutNs, std::vector<std::uint8_t>& payload, bool* invalid);
+    // The grain in place, without a copy: valid until the writer reuses its slot (the flow's
+    // history later).
+    bool view(std::uint64_t index, std::uint64_t timeoutNs, std::uint8_t const** data, std::size_t* size, bool* invalid);
 #if SRTGW_WITH_MXL
     [[nodiscard]] mxlFlowReader handle() const;
 #endif

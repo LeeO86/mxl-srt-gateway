@@ -233,6 +233,26 @@ MxlVideoWriter::~MxlVideoWriter()
 #endif
 }
 
+bool MxlVideoWriter::writeWith(std::uint64_t index, std::function<void(std::uint8_t*, std::size_t)> const& fill)
+{
+#if SRTGW_WITH_MXL
+    mxlGrainInfo info{};
+    std::uint8_t* payload = nullptr;
+    if (mxlFlowWriterOpenGrain(writer_, index, &info, &payload) != MXL_STATUS_OK || payload == nullptr)
+    {
+        return false;
+    }
+    fill(payload, static_cast<std::size_t>(info.grainSize));
+    info.flags = 0;
+    info.validSlices = info.totalSlices;
+    return mxlFlowWriterCommitGrain(writer_, &info) == MXL_STATUS_OK;
+#else
+    (void)index;
+    (void)fill;
+    return false;
+#endif
+}
+
 bool MxlVideoWriter::write(std::uint64_t index, std::uint8_t const* data, std::size_t size, bool invalid)
 {
 #if SRTGW_WITH_MXL
@@ -439,14 +459,27 @@ VideoFormat MxlVideoReader::format() const
 
 bool MxlVideoReader::read(std::uint64_t index, std::uint64_t timeoutNs, std::vector<std::uint8_t>& payload, bool* invalid)
 {
-#if SRTGW_WITH_MXL
-    mxlGrainInfo info{};
-    std::uint8_t* data = nullptr;
-    if (mxlFlowReaderGetGrain(reader_, index, timeoutNs, &info, &data) != MXL_STATUS_OK || data == nullptr)
+    std::uint8_t const* data = nullptr;
+    std::size_t size = 0;
+    if (!view(index, timeoutNs, &data, &size, invalid))
     {
         return false;
     }
-    payload.assign(data, data + info.grainSize);
+    payload.assign(data, data + size);
+    return true;
+}
+
+bool MxlVideoReader::view(std::uint64_t index, std::uint64_t timeoutNs, std::uint8_t const** data, std::size_t* size, bool* invalid)
+{
+#if SRTGW_WITH_MXL
+    mxlGrainInfo info{};
+    std::uint8_t* grain = nullptr;
+    if (mxlFlowReaderGetGrain(reader_, index, timeoutNs, &info, &grain) != MXL_STATUS_OK || grain == nullptr)
+    {
+        return false;
+    }
+    *data = grain;
+    *size = static_cast<std::size_t>(info.grainSize);
     if (invalid != nullptr)
     {
         *invalid = (info.flags & MXL_GRAIN_FLAG_INVALID) != 0 || info.validSlices < info.totalSlices;
@@ -455,7 +488,8 @@ bool MxlVideoReader::read(std::uint64_t index, std::uint64_t timeoutNs, std::vec
 #else
     (void)index;
     (void)timeoutNs;
-    (void)payload;
+    (void)data;
+    (void)size;
     if (invalid != nullptr)
     {
         *invalid = true;
