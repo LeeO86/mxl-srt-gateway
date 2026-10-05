@@ -135,6 +135,46 @@ TEST_CASE("a matrix patch keeps the channel label and the per-tap gains")
     CHECK(patched.egress.codec == original.egress.codec);
 }
 
+TEST_CASE("v210 fields: one parity of the rows, and back")
+{
+    for (auto const& raster : {std::pair{1920, 1080}, std::pair{718, 9}})
+    {
+        int const width = raster.first;
+        int const height = raster.second;
+        CAPTURE(height);
+        int const cw = (width + 1) / 2;
+        int const ch = (height + 1) / 2;
+        std::vector<std::uint8_t> y(static_cast<std::size_t>(width * height));
+        std::vector<std::uint8_t> cb(static_cast<std::size_t>(cw * ch));
+        std::vector<std::uint8_t> cr(cb.size());
+        for (std::size_t i = 0; i < y.size(); ++i)
+        {
+            y[i] = static_cast<std::uint8_t>(i * 7 + i / 1000);
+        }
+        for (std::size_t i = 0; i < cb.size(); ++i)
+        {
+            cb[i] = static_cast<std::uint8_t>(i * 13);
+            cr[i] = static_cast<std::uint8_t>(i * 5 + 3);
+        }
+        auto const stride = v210Stride(width);
+        std::vector<std::uint8_t> frame(v210Size(width, height));
+        yuv420ToV210(y.data(), width, cb.data(), cr.data(), cw, width, height, true, frame.data(), stride);
+        std::vector<std::vector<std::uint8_t>> fields;
+        for (int parity : {0, 1})
+        {
+            std::vector<std::uint8_t> direct(stride * static_cast<std::size_t>((height + 1 - parity) / 2));
+            yuv420ToV210(y.data(), width, cb.data(), cr.data(), cw, width, height, true, direct.data(), stride, parity);
+            std::vector<std::uint8_t> cut(direct.size());
+            copyV210Field(frame.data(), stride, height, parity, cut.data());
+            CHECK(direct == cut);
+            fields.push_back(direct);
+        }
+        std::vector<std::uint8_t> woven(frame.size());
+        interleaveV210Fields(fields[0].data(), fields[1].data(), stride, height, woven.data());
+        CHECK(woven == frame);
+    }
+}
+
 TEST_CASE("the x264 thread count is kept and clamped")
 {
     auto const channel = channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\",\"egress\":{\"threads\":4}}", nullptr);

@@ -299,7 +299,7 @@ void setV210Simd(bool enabled)
 }
 
 void yuv420ToV210(std::uint8_t const* y, int yPitch, std::uint8_t const* cb, std::uint8_t const* cr, int cPitch, int width, int height, bool interlaced,
-    std::uint8_t* dst, std::size_t rowBytes)
+    std::uint8_t* dst, std::size_t rowBytes, int parity)
 {
     int const groups = (width + 5) / 6;
     int const full = width / 6;
@@ -311,7 +311,7 @@ void yuv420ToV210(std::uint8_t const* y, int yPitch, std::uint8_t const* cb, std
     // sample (and one byte for the 4-byte loads).
     std::vector<std::uint8_t> cbRow(static_cast<std::size_t>(groups) * 3U + 1U);
     std::vector<std::uint8_t> crRow(cbRow.size());
-    for (int row = 0; row < height; ++row)
+    for (int row = parity < 0 ? 0 : parity; row < height; row += parity < 0 ? 1 : 2)
     {
         int near = 0;
         int far = 0;
@@ -328,7 +328,7 @@ void yuv420ToV210(std::uint8_t const* y, int yPitch, std::uint8_t const* cb, std
         std::fill(cbRow.begin() + chromaWidth, cbRow.end(), cbRow[static_cast<std::size_t>(chromaWidth - 1)]);
         std::fill(crRow.begin() + chromaWidth, crRow.end(), crRow[static_cast<std::size_t>(chromaWidth - 1)]);
         std::uint8_t const* luma = y + static_cast<std::ptrdiff_t>(row) * yPitch;
-        std::uint8_t* out = dst + rowBytes * static_cast<std::size_t>(row);
+        std::uint8_t* out = dst + rowBytes * static_cast<std::size_t>(parity < 0 ? row : row / 2);
 #if SRTGW_X86
         toV210Ssse3(luma, cbRow.data(), crRow.data(), simdEnd, out);
 #endif
@@ -341,6 +341,23 @@ void yuv420ToV210(std::uint8_t const* y, int yPitch, std::uint8_t const* cb, std
             }
             packGroup(ys, cbRow.data() + g * 3, crRow.data() + g * 3, out + static_cast<std::size_t>(g) * 16U);
         }
+    }
+}
+
+void copyV210Field(std::uint8_t const* frame, std::size_t rowBytes, int height, int parity, std::uint8_t* field)
+{
+    for (int row = parity; row < height; row += 2)
+    {
+        std::memcpy(field + rowBytes * static_cast<std::size_t>(row / 2), frame + rowBytes * static_cast<std::size_t>(row), rowBytes);
+    }
+}
+
+void interleaveV210Fields(std::uint8_t const* evenRows, std::uint8_t const* oddRows, std::size_t rowBytes, int height, std::uint8_t* frame)
+{
+    for (int row = 0; row < height; ++row)
+    {
+        std::uint8_t const* field = (row & 1) == 0 ? evenRows : oddRows;
+        std::memcpy(frame + rowBytes * static_cast<std::size_t>(row), field + rowBytes * static_cast<std::size_t>(row / 2), rowBytes);
     }
 }
 

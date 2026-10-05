@@ -103,12 +103,15 @@ when the library is linked, so the gateway and other readers share one clock.
 
 Egress reads a grain in place (`MxlVideoReader::view`): it is done with it
 long before the writer comes round to that slot again (history 1 s by
-default, read offset 2 grains). The ingest's direct path fills the grain in
-place (`MxlVideoWriter::writeWith`).
+default, read offset 2 grains). It takes the grain at the output grain's
+time minus the offset (`grainIndexAt`), not the newest one minus the offset,
+which aliased with the writer's commit. The ingest's direct path fills the
+grain in place (`MxlVideoWriter::writeWith`).
 
-Interlaced flows: MXL doubles the declared `grain_rate` and each grain is one
-field (height/2 rows). The gateway still treats grains as frames (known issue
-in 1.2.0, see the CHANGELOG).
+Interlaced flows: MXL doubles the declared `grain_rate` (25 for 1080i50) and
+each grain is one field (height/2 rows). Ingest writes frame k as grains 2k
+(first field: top when `tff`) and 2k + 1, egress weaves frame k from them
+(`copyV210Field`, `interleaveV210Fields`, `yuv420ToV210(…, parity)`).
 
 `domain_def.json` carries the domain id. `options.json` sets
 `urn:x-mxl:option:history_duration/v1.0` only when this process creates the

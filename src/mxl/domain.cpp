@@ -105,17 +105,26 @@ std::string audioFlowJson(std::string const& id, std::string const& label, std::
     return out.str();
 }
 
-std::uint64_t grainIndexNow(Rate const& rate)
+std::uint64_t grainIndexAt(Rate const& rate, std::uint64_t taiNs)
 {
 #if SRTGW_WITH_MXL
     mxlRational edit{static_cast<std::int64_t>(rate.num), static_cast<std::int64_t>(rate.den)};
-    return mxlTimestampToIndex(&edit, mxlGetTime());
+    return mxlTimestampToIndex(&edit, taiNs);
 #else
     if (rate.num <= 0)
     {
         return 0;
     }
-    return static_cast<std::uint64_t>((static_cast<__int128>(taiNowNs()) * rate.num) / (static_cast<__int128>(rate.den) * 1000000000));
+    return static_cast<std::uint64_t>((static_cast<__int128>(taiNs) * rate.num) / (static_cast<__int128>(rate.den) * 1000000000));
+#endif
+}
+
+std::uint64_t grainIndexNow(Rate const& rate)
+{
+#if SRTGW_WITH_MXL
+    return grainIndexAt(rate, mxlGetTime());
+#else
+    return grainIndexAt(rate, static_cast<std::uint64_t>(taiNowNs()));
 #endif
 }
 

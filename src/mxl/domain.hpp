@@ -153,6 +153,7 @@ private:
 };
 
 std::uint64_t grainIndexNow(Rate const& rate);
+std::uint64_t grainIndexAt(Rate const& rate, std::uint64_t taiNs);
 std::uint64_t grainTimeNs(Rate const& rate, std::uint64_t index);
 std::string videoFlowJson(std::string const& id, std::string const& label, std::string const& group, VideoFormat const& format);
 std::string audioFlowJson(std::string const& id, std::string const& label, std::string const& group, int channels);

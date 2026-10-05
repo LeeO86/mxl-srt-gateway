@@ -16,8 +16,15 @@ std::vector<std::uint8_t> renderBars(int width, int height);
 // 8-bit 4:2:0 planes to v210 rows `rowBytes` apart (the padding is not written). The
 // arithmetic of the CUDA kernel nv12ToV210: samples × 4, chroma blended 3:1 from the two
 // nearest 4:2:0 rows (of the same field when interlaced), so CPU and GPU give the same picture.
+// `parity` 0 or 1 converts only the frame rows of that parity (0: rows 0, 2, …, the top
+// field), one after another: one MXL field grain.
 void yuv420ToV210(std::uint8_t const* y, int yPitch, std::uint8_t const* cb, std::uint8_t const* cr, int cPitch, int width, int height, bool interlaced,
-    std::uint8_t* dst, std::size_t rowBytes);
+    std::uint8_t* dst, std::size_t rowBytes, int parity = -1);
+
+// The rows of one parity of a v210 frame, one after another (an MXL field grain).
+void copyV210Field(std::uint8_t const* frame, std::size_t rowBytes, int height, int parity, std::uint8_t* field);
+// A v210 frame from its two fields: `evenRows` holds frame rows 0, 2, …
+void interleaveV210Fields(std::uint8_t const* evenRows, std::uint8_t const* oddRows, std::size_t rowBytes, int height, std::uint8_t* frame);
 
 // v210 to 8-bit 4:2:0 planes. The arithmetic of the CUDA kernel v210ToNv12: samples rounded
 // to 8 bits, chroma the mean of two rows (of the same field when interlaced).

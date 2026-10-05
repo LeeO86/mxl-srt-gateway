@@ -1340,6 +1340,9 @@ void IngestPipeline::runClock()
     std::uint64_t drops = 0;
     std::uint64_t frames = 0;
     std::int64_t lastJpeg = 0;
+    // MXL interlaced flows: one grain per field (see the video write below).
+    bool const fieldGrains = config_.target.interlaced;
+    bool const topFieldFirst = config_.target.fieldOrder != "bff";
     while (!stop_.load())
     {
         std::uint64_t const nowIndex = grainIndexNow(config_.target.rate);
@@ -1416,20 +1419,41 @@ void IngestPipeline::runClock()
                 }
             }
         }
-        if (video && haveChosen && chosen.yuv && chosen.yuv->width == config_.target.width && chosen.yuv->height == config_.target.height)
+        // An interlaced MXL flow holds one field per grain at twice the frame rate: frame
+        // `index` is grains 2·index (first field: the top one when tff) and 2·index + 1.
+        AVFrame const* const yuv =
+            haveChosen && chosen.yuv && chosen.yuv->width == config_.target.width && chosen.yuv->height == config_.target.height ? chosen.yuv.get() : nullptr;
+        int const width = config_.target.width;
+        int const height = config_.target.height;
+        auto const stride = v210Stride(width);
+        for (int part = 0; video && part < (fieldGrains ? 2 : 1); ++part)
         {
-            AVFrame const* f = chosen.yuv.get();
-            video->writeWith(index, [&](std::uint8_t* grain, std::size_t size) {
-                if (size >= v210Size(f->width, f->height))
-                {
-                    yuv420ToV210(f->data[0], f->linesize[0], f->data[1], f->data[2], f->linesize[1], f->width, f->height, chosen.interlaced, grain,
-                        v210Stride(f->width));
-                }
-            });
-        }
-        else if (video)
-        {
-            video->write(index, picture, pictureSize, false);
+            std::uint64_t const grain = fieldGrains ? index * 2 + static_cast<std::uint64_t>(part) : index;
+            int const parity = !fieldGrains ? -1 : ((part == 0) == topFieldFirst ? 0 : 1);
+            std::size_t const rows = static_cast<std::size_t>(parity < 0 ? height : (height + 1 - parity) / 2);
+            if (yuv != nullptr)
+            {
+                video->writeWith(grain, [&](std::uint8_t* dst, std::size_t size) {
+                    if (size >= stride * rows)
+                    {
+                        yuv420ToV210(yuv->data[0], yuv->linesize[0], yuv->data[1], yuv->data[2], yuv->linesize[1], width, height, chosen.interlaced, dst, stride,
+                            parity);
+                    }
+                });
+            }
+            else if (fieldGrains)
+            {
+                video->writeWith(grain, [&](std::uint8_t* dst, std::size_t size) {
+                    if (size >= stride * rows && pictureSize >= v210Size(width, height))
+                    {
+                        copyV210Field(picture, stride, height, parity, dst);
+                    }
+                });
+            }
+            else
+            {
+                video->write(grain, picture, pictureSize, false);
+            }
         }
         int const samples = samplesPerGrain(static_cast<std::int64_t>(index), config_.target.rate.num, config_.target.rate.den);
         std::vector<double> meters;
@@ -1674,6 +1698,8 @@ void EgressPipeline::run()
     // The graph only converts the pixel format: v210 goes straight into `yuv` instead.
     bool plainGraph = false;
     AVFrame* yuv = nullptr;
+    // An interlaced source frame woven from its two field grains.
+    std::vector<std::uint8_t> woven;
     std::vector<AVCodecContext*> audioEnc;
     AVFormatContext* mux = nullptr;
     AVIOContext* avio = nullptr;
@@ -1993,20 +2019,53 @@ void EgressPipeline::run()
             {
                 source = videoReader.format();
                 int const offset = config_.egress.readOffsetGrains + (videoRoute.mirror ? 4 : 0);
-                std::uint64_t const head = videoReader.head();
+                // An interlaced MXL flow holds one field per grain at twice the frame rate:
+                // frame k is grains 2k (first field) and 2k + 1. Indexes below count frames.
+                bool const fieldGrains = source.interlaced;
+                std::uint64_t head = videoReader.head();
+                if (fieldGrains)
+                {
+                    // The newest frame with both fields written.
+                    head = head % 2 == 1 ? head / 2 : (head > 0 ? head / 2 - 1 : 0);
+                }
                 if (head > static_cast<std::uint64_t>(offset))
                 {
-                    std::uint64_t const srcIndex = head - static_cast<std::uint64_t>(offset);
+                    // MXL grains are indexed by time: take the frame `offset` periods before this
+                    // output grain. "Newest minus offset" aliased with the writer's commit (a
+                    // repeat and a drop whenever a commit straddled the tick); a source running
+                    // later than the offset is still followed.
+                    std::uint64_t const due = grainIndexAt(source.rate, grainTimeNs(config_.target.rate, index));
+                    std::uint64_t const srcIndex = std::min(due - static_cast<std::uint64_t>(offset), head);
+                    Rate fieldRate = source.rate;
+                    fieldRate.num *= 2;
                     if (sync)
                     {
-                        sync->waitFor(grainTimeNs(source.rate, srcIndex), 40000000);
+                        sync->waitFor(fieldGrains ? grainTimeNs(fieldRate, srcIndex * 2 + 1) : grainTimeNs(source.rate, srcIndex), 40000000);
                     }
                     bool invalid = false;
                     std::uint8_t const* grain = nullptr;
                     std::size_t grainSize = 0;
                     // In place: the loop is done with the grain long before the writer comes
                     // round to its slot again.
-                    if (videoReader.view(srcIndex, 40000000, &grain, &grainSize, &invalid) && !invalid)
+                    bool haveGrain = videoReader.view(fieldGrains ? srcIndex * 2 : srcIndex, 40000000, &grain, &grainSize, &invalid) && !invalid;
+                    if (haveGrain && fieldGrains)
+                    {
+                        auto const stride = v210Stride(source.width);
+                        std::size_t const fieldBytes = stride * static_cast<std::size_t>(source.height / 2);
+                        std::uint8_t const* second = nullptr;
+                        std::size_t secondSize = 0;
+                        haveGrain = grainSize >= fieldBytes && videoReader.view(srcIndex * 2 + 1, 40000000, &second, &secondSize, &invalid) && !invalid &&
+                               secondSize >= fieldBytes;
+                        if (haveGrain)
+                        {
+                            bool const topFirst = source.fieldOrder != "bff";
+                            woven.resize(v210Size(source.width, source.height));
+                            interleaveV210Fields(topFirst ? grain : second, topFirst ? second : grain, stride, source.height, woven.data());
+                            grain = woven.data();
+                            grainSize = woven.size();
+                        }
+                    }
+                    if (haveGrain)
                     {
                         picture = grain;
                         pictureSize = grainSize;
@@ -2151,6 +2210,16 @@ void EgressPipeline::run()
         if (haveFrame)
         {
             encoded->pts = videoPts;
+            if (config_.target.interlaced)
+            {
+                // libx264 takes the field order from the frame; without it the stream says
+                // bottom field first.
+                encoded->flags |= AV_FRAME_FLAG_INTERLACED;
+                if (config_.target.fieldOrder != "bff")
+                {
+                    encoded->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+                }
+            }
             if (needKeyframe && primary.connected())
             {
                 encoded->pict_type = AV_PICTURE_TYPE_I;

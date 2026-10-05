@@ -262,9 +262,11 @@ corporate firewall. Therefore:
 
 ### 6.1 MXL input
 
-- Video and audio receivers per §4; readers read `read_offset_grains` (default 2)
-  behind head (more on mirror domains), aligned via the MXL synchronisation group
-  for video and audio.
+- Video and audio receivers per §4; readers read the grain `read_offset_grains`
+  (default 2) before the output grain's time, or the newest one when the source
+  runs later (more on mirror domains), aligned via the MXL synchronisation group
+  for video and audio. An interlaced flow holds one field per grain at twice the
+  declared rate; the offset counts frames.
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
