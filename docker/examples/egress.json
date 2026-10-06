@@ -6,7 +6,7 @@
       "direction": "egress",
       "srt": {"mode": "caller", "remote_host": "ingest", "remote_port": 9000, "latency_ms": 200},
       "target": {"width": 1920, "height": 1080, "scan": "progressive", "rate": "50"},
-      "egress": {"codec": "h264", "bitrate": 15000000, "preset": "veryfast", "tune": "zerolatency"}
+      "egress": {"codec": "h264", "bitrate": 15000000, "preset": "veryfast", "tune": "zerolatency", "threads": 4}
     }
   ]
 }
