@@ -109,6 +109,10 @@ TEST_CASE("output domain files are not overwritten and cleanup stays inside the 
     std::string text;
     std::getline(in, text);
     CHECK(text.find("11111111-1111-4111-8111-111111111111") != std::string::npos);
+    // BCP-007-03 schema: id, label, description and tags are required.
+    CHECK(text.find("\"label\":\"") != std::string::npos);
+    CHECK(text.find("\"description\":\"") != std::string::npos);
+    CHECK(text.find("\"tags\":{}") != std::string::npos);
     CHECK_FALSE(removeOwnDomain(path.string(), "22222222-2222-4222-8222-222222222222"));
     CHECK(std::filesystem::exists(path / "domain_def.json"));
     CHECK(removeOwnDomain(path.string(), "11111111-1111-4111-8111-111111111111"));

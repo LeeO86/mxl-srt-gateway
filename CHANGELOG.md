@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- A new output `domain_def.json` carries `description` and `tags`, as BCP-007-03 requires (`id`, `label`, `description`, `tags`). The gateway wrote only `id` and `label`, and mxl-st2110-gateway 1.0.2 skipped such domains. An existing file is still not rewritten.
+
 ## 1.2.0
 
 Measured on the lab host without a GPU ([docs/hardware.md](docs/hardware.md), 1080p50, H.264 15 Mbit/s `veryfast`, egress into ingest on the same host): one channel now keeps real time on the CPU (1.1.2: 46.6 fps encode, 36 fps decode), and 8 channels run with no frame-sync repeat or drop at 1.9 / 6.8 cores with `threads: 4`. 1.1.2 did not keep 4 channels (41.7 fps, 3.4 / 8.4 cores). On the GPU, 8 channels take 1.6 / 1.3 cores instead of 2.5 / 2.2. Interlaced MXL flows (one field per grain) work now.
