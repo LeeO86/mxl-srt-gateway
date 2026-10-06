@@ -62,7 +62,8 @@ bool ensureOutputDomain(std::string const& path, std::string const& id, std::int
     }
     else
     {
-        writeText(def, std::string("{\"id\":\"") + id + "\",\"label\":\"mxl-srt-gateway\"}\n");
+        // BCP-007-03 requires id, label, description and tags.
+        writeText(def, std::string("{\"id\":\"") + id + "\",\"label\":\"mxl-srt-gateway\",\"description\":\"Output domain of mxl-srt-gateway\",\"tags\":{}}\n");
     }
     auto const options = std::filesystem::path(path) / "options.json";
     if (!std::filesystem::exists(options))
