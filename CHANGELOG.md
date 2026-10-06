@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0
+
+Measured on the lab host without a GPU ([docs/hardware.md](docs/hardware.md), 1080p50, H.264 15 Mbit/s `veryfast`, egress into ingest on the same host): one channel now keeps real time on the CPU (1.1.2: 46.6 fps encode, 36 fps decode), and 8 channels run with no frame-sync repeat or drop at 1.9 / 6.8 cores with `threads: 4`. 1.1.2 did not keep 4 channels (41.7 fps, 3.4 / 8.4 cores). On the GPU, 8 channels take 1.6 / 1.3 cores instead of 2.5 / 2.2. Interlaced MXL flows (one field per grain) work now.
+
+- v210 rows are padded to 128 bytes (48 pixels), as MXL and FFmpeg lay them out. Before, widths that are not a multiple of 48 got the wrong row size: a 1280×720 egress only ever sent its loss slate, and the 720p ingest slate and black picture were sheared (GPU path included).
+- CPU ingest: when nothing needs adapting, the writer packs the decoded 4:2:0 picture to v210 straight into the MXL grain (SSSE3). Before, swscale converted it to 10-bit 4:2:2, FFmpeg's v210 encoder packed it into a new buffer per frame, and the writer copied that into the grain.
+- CPU egress: the grain is read in place and converted straight to the 4:2:0 frame x264 takes (SSSE3, one frame reused). Before, every frame copied the grain and the slate, then went through FFmpeg's v210 decoder and swscale.
+- The new conversions use the GPU kernels' arithmetic (4:2:0 to 4:2:2: chroma 3:1 from the two nearest rows; 4:2:2 to 4:2:0: mean of two rows; within the field when interlaced), so the CPU and GPU paths give the same picture. Unit tests compare both directions byte for byte with a transcription of the kernels, with and without SSSE3.
+- `egress.threads` sets libx264's thread count (default 0: x264's own choice, 16 slice threads at 1080p with `zerolatency`). With 4, 8 × 1080p50 `veryfast` took 22 % less egress CPU on the lab host and p95 encode latency stayed ≤ 10 ms.
+- The ingest's packed pictures (GPU path and adapted CPU path) come from a pool instead of a new allocation per frame; egress reads grains in place on the GPU path too.
+- Interlaced MXL flows: MXL doubles an interlaced flow's declared `grain_rate` and each grain holds one field. Ingest now writes frame k as grains 2k (first field: the top one when `tff`) and 2k + 1; egress weaves frame k from those two grains. Before, ingest wrote half a frame into each field grain and a 1080i egress only ever sent its slate. Checked on the lab with black top and white bottom fields through ingest → egress → ingest, CPU and GPU.
+- Interlaced egress tells libx264 the field order on every frame; the stream said bottom field first before.
+- Egress takes the source grain `read_offset_grains` before the output grain's time (MXL grains are indexed by time) instead of the newest grain minus the offset; it still follows a source that runs later than that. The newest grain moved between n−1 and n depending on whether the writer's commit came just before or after the egress tick: with 1.1.2, 4–10 repeat/drop pairs per channel in 45 s on the lab, now 0.
+
 ## 1.1.2
 
 - A busy `NMOS_PORT` or `NMOS_PORT`+1 exits 75 again within a second. 1.1.1 noticed the failed listener only after nmos-cpp had started, and stopping that server hung: on the lab host the process neither exited nor served (killed after 9 minutes). The ports are now bound and released once before the node starts. The CI test passed with 1.1.1; the lab host showed the hang.

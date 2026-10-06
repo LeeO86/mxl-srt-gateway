@@ -262,9 +262,11 @@ corporate firewall. Therefore:
 
 ### 6.1 MXL input
 
-- Video and audio receivers per §4; readers read `read_offset_grains` (default 2)
-  behind head (more on mirror domains), aligned via the MXL synchronisation group
-  for video and audio.
+- Video and audio receivers per §4; readers read the grain `read_offset_grains`
+  (default 2) before the output grain's time, or the newest one when the source
+  runs later (more on mirror domains), aligned via the MXL synchronisation group
+  for video and audio. An interlaced flow holds one field per grain at twice the
+  declared rate; the offset counts frames.
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
@@ -277,7 +279,7 @@ corporate firewall. Therefore:
 - Video codecs: H.264 (default), HEVC. `ENCODER=auto|nvenc|cpu`. Settings: CBR
   bitrate (default 15 Mbit/s 1080p50), GOP length (default 1 s), B-frames
   (default 0 for low latency), profile/level, NVENC preset and tuning
-  (`ll`/`ull`), x264 preset and `zerolatency`. Interlaced encoding only where the
+  (`ll`/`ull`), x264 preset, `zerolatency` and thread count. Interlaced encoding only where the
   encoder supports it (detect at start; otherwise refuse that configuration with
   a clear error).
 - Audio (multichannel, v1 requirement): up to **16 tracks**, each its own PID with

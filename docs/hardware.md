@@ -29,6 +29,48 @@ channel status reports the CPU decoder name. Interlaced HEVC is rejected at
 configuration time. Interlaced H.264 is offered to the encoder and, if the
 open fails, the channel enters `error` with that reason.
 
+## Lab run 2026-10-05: CPU only (1.2.0)
+
+Same host, containers without a GPU (`DECODER=cpu`, `ENCODER=cpu`). N egress
+channels read the test player's 1080p50 flows and send H.264 at 15 Mbit/s
+(`veryfast`, `zerolatency`, B-frames 0) to N ingest listeners of a second
+gateway; 20 s warm-up, 40 s measured; cores are the containers' CPU time.
+
+| Channels | Version | Encode fps | Decode fps (avg) | Ingest repeats / drops | Ingest / egress CPU |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1.1.2 | 46.6 | 36.0 | 98 / 3 | 0.9 / 2.5 cores |
+| 4 | 1.1.2 | 41.7 | 36.3 | 1577 / 462 | 3.4 / 8.4 cores |
+| 1 | 1.2.0 | 50.0 | 49.2 | 0 / 0 | 0.3 / 1.3 cores |
+| 4 | 1.2.0 | 50.0 | 49.4 | 0 / 0 | 0.9 / 4.4 cores |
+| 8 | 1.2.0 | 50.0 | 49.5 | 0 / 0 | 1.9 / 9.2 cores |
+| 1 | 1.2.0, `threads: 4` | 50.0 | – | 0 / 0 | 0.3 / 0.9 cores |
+| 4 | 1.2.0, `threads: 4` | 50.0 | 49.3 | 0 / 0 | 0.9 / 3.2 cores |
+| 8 | 1.2.0, `threads: 4` | 50.0 | 48.7 | 0 / 0 | 1.9 / 6.8 cores |
+
+Where 1.1.2 spent the time (perf, one channel): egress 66 % x264, 17 % kernel
+page faults (two 5.5 MB buffers allocated and copied per frame), 8 % swscale;
+ingest 47 % swscale (4:2:0 to 10-bit 4:2:2), 34 % decode, and the decode
+thread could not keep 50 fps. In 1.2.0 the egress is x264 plus about 6 % for
+the conversion. x264's default with `zerolatency` is 16 slice threads per
+encoder; `threads: 4` saves 22 % at 8 channels (less waking, fewer slices),
+keeps p95 encode latency at ≤ 10 ms and leaves about 0.86 cores per 1080p50
+`veryfast` channel.
+
+GPU path with 1.2.0 (`DECODER`/`ENCODER=auto`, 8 channels): 0 repeats or
+drops, 1.6 / 1.3 cores (1.1.0: 2.5 / 2.2), NVENC 89 %.
+
+Egress repeats/drops (source grain reused or skipped): 1.1.2 counted 4–10
+pairs per channel in 45 s on the GPU path, 1.2.0 none (CPU and GPU, 8
+channels), since it reads by time instead of "newest grain minus the offset".
+
+1280×720p50 round trip (ffmpeg `testsrc2` → ingest → egress → ingest), CPU
+and GPU: 1.2.0 passes the picture; 1.1.2's egress sent only its loss slate
+(the v210 row size of a width that is not a multiple of 48 was wrong).
+
+1080i50 round trip, CPU and GPU, from a source with black top and white
+bottom fields: in both ingested flows the even grains (first field) have
+luma 64 and the odd ones 940. 1.1.2's egress sent its slate.
+
 ## Lab run 2026-10-03: NVIDIA A16
 
 Not one of the target GPUs. The A16 is four GA107 GPUs (one NVENC, two NVDEC

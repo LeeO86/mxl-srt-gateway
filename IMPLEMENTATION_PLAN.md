@@ -57,11 +57,15 @@ both.
 
 ## Deviations
 
-1. **v210 packing.** The gateway asks the FFmpeg `v210` encoder (and decoder)
-   to convert `yuv422p10le` to the packed 10-bit 4:2:2 grain. `AV_PIX_FMT_V210`
-   is not a pixel format in the FFmpeg 6.1 headers this tree also builds
-   against; the codec is. The bytes are still SMPTE v210 and the flow media
-   type is `video/v210`.
+1. **v210 packing.** When the raster needs no adaptation, the CPU path converts
+   between 8-bit 4:2:0 and v210 itself (`src/media/v210.cpp`, SSSE3 with a
+   portable fallback, the arithmetic of the CUDA kernels): ingest packs the
+   decoded picture straight into the grain, egress reads the grain in place
+   into the encoder's 4:2:0 frame. Adapted pictures go through the FFmpeg
+   `v210` encoder (and decoder) from `yuv422p10le`; `AV_PIX_FMT_V210` is not a
+   pixel format in the FFmpeg 6.1 headers this tree also builds against, the
+   codec is. The bytes are SMPTE v210 with rows padded to 128 bytes (48
+   pixels), as MXL lays them out, and the flow media type is `video/v210`.
 2. **59.94 audio cadence.** The specification's "1601/1602 at 59.94" matches
    29.97 fps (`30000/1001`): 48000 × 1001 / 30000 ≈ 1601.6. At 59.94 fps
    (`60000/1001`) the same rounding is 800/801. Writing 1602 samples into a
@@ -96,6 +100,18 @@ and `mxlFlowWriterOpenSamples` / `CommitSamples`. Samples are addressed as
 `GetSamples`. Egress waits with `mxlFlowSynchronizationGroupWaitForDataAt` on
 the grain's TAI timestamp. Indexes use `mxlTimestampToIndex` / `mxlIndexToTimestamp`
 when the library is linked, so the gateway and other readers share one clock.
+
+Egress reads a grain in place (`MxlVideoReader::view`): it is done with it
+long before the writer comes round to that slot again (history 1 s by
+default, read offset 2 grains). It takes the grain at the output grain's
+time minus the offset (`grainIndexAt`), not the newest one minus the offset,
+which aliased with the writer's commit. The ingest's direct path fills the
+grain in place (`MxlVideoWriter::writeWith`).
+
+Interlaced flows: MXL doubles the declared `grain_rate` (25 for 1080i50) and
+each grain is one field (height/2 rows). Ingest writes frame k as grains 2k
+(first field: top when `tff`) and 2k + 1, egress weaves frame k from them
+(`copyV210Field`, `interleaveV210Fields`, `yuv420ToV210(…, parity)`).
 
 `domain_def.json` carries the domain id. `options.json` sets
 `urn:x-mxl:option:history_duration/v1.0` only when this process creates the

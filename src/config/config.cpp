@@ -5,6 +5,7 @@
 #include "util/net.hpp"
 #include "util/uuid.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -818,6 +819,7 @@ std::string channelToJson(ChannelConfig const& channel, bool includeSecrets)
     egress["level"] = picojson::value(channel.egress.level);
     egress["preset"] = picojson::value(channel.egress.preset);
     egress["tune"] = picojson::value(channel.egress.tune);
+    egress["threads"] = picojson::value(static_cast<double>(channel.egress.threads));
     egress["nvenc_preset"] = picojson::value(channel.egress.nvencPreset);
     egress["nvenc_tune"] = picojson::value(channel.egress.nvencTune);
     picojson::array tracks;
@@ -932,6 +934,7 @@ ChannelConfig channelFromJson(std::string const& text, ChannelConfig const* prev
         channel.egress.level = json::fieldString(egress, "level", channel.egress.level);
         channel.egress.preset = json::fieldString(egress, "preset", channel.egress.preset);
         channel.egress.tune = json::fieldString(egress, "tune", channel.egress.tune);
+        channel.egress.threads = std::clamp(json::fieldInt(egress, "threads", channel.egress.threads), 0, 64);
         channel.egress.nvencPreset = json::fieldString(egress, "nvenc_preset", channel.egress.nvencPreset);
         channel.egress.nvencTune = json::fieldString(egress, "nvenc_tune", channel.egress.nvencTune);
         channel.egress.serviceName = json::fieldString(egress, "service_name", channel.egress.serviceName);
