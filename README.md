@@ -117,6 +117,13 @@ codecs. To use the GPU, run it with the NVIDIA Container Toolkit
 filters on those frames, and NVENC, and falls back per stream when the device
 or the graph cannot be opened.
 
+On the CPU (no GPU, or `ENCODER=cpu`), egress encodes with libx264 at the
+channel's `egress.preset` (default `veryfast`) and `egress.tune` (default
+`zerolatency`). `egress.threads` sets libx264's thread count: 0 (default)
+leaves it to x264, which takes 16 slice threads at 1080p; 4 used 22 % less
+CPU at 8 × 1080p50 on the lab host and kept p95 encode latency at ≤ 10 ms
+([docs/hardware.md](docs/hardware.md)). NVENC ignores it.
+
 ## Layout
 
 `src/` is the gateway, `web/` the Vue 3 UI embedded in the binary, `tests/`
