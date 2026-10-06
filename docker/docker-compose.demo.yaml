@@ -2,15 +2,21 @@
 # One egress channel sends SRT to the ingest listener in the same process is
 # not possible for two NMOS nodes, so this file runs two gateway containers.
 services:
+  # The platform's registry image (mxl-poc-platform versions.yml); rhastie/nmos-cpp:latest-amd64
+  # is gone and :latest no longer takes these arguments. Registration 3210, Query 3211.
   registry:
-    image: rhastie/nmos-cpp:latest-amd64
-    command: ["--domain", "local", "registry"]
+    image: docker.io/gemini2350/nmos-cpp-registry:sha-53481ff@sha256:3c2fa0793ce336e4176487878758efcbd5c61414c5b90433f3758851615f1c91
+    environment:
+      RUN_MQTT: "FALSE"
+      ADVERTISE_MQTT: "FALSE"
+    volumes:
+      - ./registry.json:/home/registry.json:ro
     ports:
       - "3210:3210"
       - "3211:3211"
 
   egress:
-    image: ghcr.io/leeo86/mxl-srt-gateway:latest
+    image: ghcr.io/leeo86/mxl-srt-gateway:1.2.0
     depends_on: [registry]
     environment:
       NMOS_REGISTRY_ADDRESS: registry
@@ -27,7 +33,7 @@ services:
       - "8120:8120"
 
   ingest:
-    image: ghcr.io/leeo86/mxl-srt-gateway:latest
+    image: ghcr.io/leeo86/mxl-srt-gateway:1.2.0
     depends_on: [registry, egress]
     environment:
       NMOS_REGISTRY_ADDRESS: registry
@@ -46,4 +52,10 @@ services:
       - "9000:9000/udp"
 
 volumes:
+  # MXL wants a tmpfs; mode 1777 because the gateways run as uid 1000 (a plain named volume is
+  # owned by root: "cannot create MXL domain", exit 75).
   mxl:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1g,mode=1777
