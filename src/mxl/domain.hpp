@@ -28,6 +28,9 @@ struct DomainRecord
 
 std::vector<DomainRecord> scanDomains(std::string const& root);
 std::string resolveDomainPath(std::string const& root, std::string const& id);
+// GET /api/v1/domains: each domain's label and its flows (<id>.mxl-flow/flow_def.json) with
+// label, media type and format. `ownId` marks this process's output domain.
+std::string domainsJson(std::vector<DomainRecord> const& domains, std::string const& ownId);
 // Creates the directory and writes domain_def.json and options.json only when they are absent.
 // An existing domain_def.json with a different id is left untouched and reported in error.
 bool ensureOutputDomain(std::string const& path, std::string const& id, std::int64_t historyNs, std::string* error);

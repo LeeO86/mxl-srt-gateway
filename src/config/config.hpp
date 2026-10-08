@@ -148,6 +148,8 @@ struct LoadedConfig
     Config config;
     std::map<std::string, ValueOrigin> origin;
     bool restartRequired = false;
+    // The environment loadFromSources was given (without SRTGW_CHANNELS_JSON), so a reload keeps its precedence.
+    std::map<std::string, std::string> env;
 };
 
 ChannelConfig defaultIngest(std::string const& id, int port);
@@ -162,6 +164,8 @@ std::string channelToJson(ChannelConfig const& channel, bool includeSecrets);
 ChannelConfig channelFromJson(std::string const& json, ChannelConfig const* previous);
 std::string configToJson(LoadedConfig const& loaded, bool includeSecrets);
 std::string configToEnv(Config const& config);
+// GET /api/v1/info: versions, the node label, the announced address and the config file.
+std::string infoJson(Config const& config);
 
 bool isRestartKey(std::string const& key);
 std::vector<std::string> globalKeys();

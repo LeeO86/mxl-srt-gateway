@@ -1,4 +1,5 @@
 #include "config/config.hpp"
+#include "config/store.hpp"
 #include "mxl/domain.hpp"
 #include "media/adapt.hpp"
 #include "media/format.hpp"
@@ -9,7 +10,9 @@
 #include "nmos/ids.hpp"
 #include "ops/metrics.hpp"
 #include "srt/access.hpp"
+#include "util/jsonutil.hpp"
 #include "util/uuid.hpp"
+#include "version.hpp"
 
 #include <doctest/doctest.h>
 
@@ -186,6 +189,100 @@ TEST_CASE("the x264 thread count is kept and clamped")
     CHECK(channelFromJson(channelToJson(channel, true), nullptr).egress.threads == 4);
     CHECK(channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\",\"egress\":{\"threads\":500}}", nullptr).egress.threads == 64);
     CHECK(channelFromJson("{\"id\":\"out1\",\"direction\":\"egress\"}", nullptr).egress.threads == 0);
+}
+
+TEST_CASE("the x264 preset does not replace the egress audio tracks")
+{
+    auto const channel = channelFromJson(
+        "{\"id\":\"out1\",\"direction\":\"egress\",\"egress\":{\"preset\":\"veryfast\",\"audio_tracks\":[{\"codec\":\"aac\",\"layout\":\"stereo\",\"channels\":[0,1],\"language\":\"eng\"},{\"codec\":\"mp2\",\"layout\":\"stereo\",\"channels\":[2,3]}]}}",
+        nullptr);
+    CHECK(channel.egress.preset == "veryfast");
+    REQUIRE(channel.egress.audioTracks.size() == 2);
+    // A saved channel (the config file, GET /channels) carries both and loads the same tracks.
+    auto const again = channelFromJson(channelToJson(channel, true), nullptr);
+    REQUIRE(again.egress.audioTracks.size() == 2);
+    CHECK(again.egress.audioTracks[0].language == "eng");
+    CHECK(again.egress.audioTracks[1].codec == "mp2");
+    auto const preset = channelFromJson("{\"id\":\"out1\",\"egress\":{\"audio_preset\":\"8x-stereo-aac\"}}", &channel);
+    CHECK(preset.egress.audioTracks.size() == 8);
+    CHECK(preset.egress.preset == "veryfast");
+    auto const legacy = channelFromJson("{\"id\":\"out1\",\"egress\":{\"preset\":\"16ch-302m\"}}", &channel);
+    CHECK(legacy.egress.audioTracks.size() == 2);
+    CHECK(legacy.egress.audioTracks[0].codec == "s302m");
+    CHECK(legacy.egress.preset == "veryfast");
+}
+
+TEST_CASE("saved settings keep the environment and flag a restart only for an accepted change")
+{
+    ConfigStore store(loadFromSources({{"LOG_LEVEL", "info"}}, "[]", {{"WEB_PORT", "8300"}, {"NMOS_HOST_ADDRESS", "10.1.2.3"}}));
+    store.replaceGlobals({{"LOG_LEVEL", "debug"}, {"DECODER", "auto"}});
+    auto snapshot = store.snapshot();
+    CHECK(snapshot.config.logLevel == "debug");
+    CHECK(snapshot.config.webPort == 8300);
+    CHECK(snapshot.origin.at("WEB_PORT") == ValueOrigin::Env);
+    CHECK(snapshot.origin.at("LOG_LEVEL") == ValueOrigin::File);
+    CHECK_FALSE(snapshot.restartRequired);
+    CHECK_THROWS_AS(store.replaceGlobals({{"DECODER", "gpu"}}), ConfigError);
+    CHECK_FALSE(store.snapshot().restartRequired);
+    CHECK(store.snapshot().config.decoder == "auto");
+    store.replaceGlobals({{"DECODER", "cpu"}});
+    CHECK(store.snapshot().restartRequired);
+    CHECK(store.snapshot().config.decoder == "cpu");
+}
+
+TEST_CASE("info names the versions, the node label and the config file")
+{
+    auto loaded = loadFromSources({}, "[]", {{"HOST_ID", "lab-1"}, {"NMOS_HOST_ADDRESS", "10.1.2.3"}});
+    loaded.config.configFile = "/config/gateway.json";
+    std::string error;
+    auto const info = json::parse(infoJson(loaded.config), &error);
+    CHECK(error.empty());
+    CHECK(json::fieldString(info, "version") == kVersion);
+    CHECK(json::fieldString(info, "mxl") == kMxlRef);
+    CHECK(json::fieldString(info, "label") == "lab-1");
+    CHECK(json::fieldString(info, "host_address") == "10.1.2.3");
+    CHECK(json::fieldString(info, "config_file") == "/config/gateway.json");
+    auto const labelled = loadFromSources({}, "[]", {{"NMOS_LABEL", "Edge SRT"}, {"NMOS_HOST_ADDRESS", "10.1.2.3"}});
+    CHECK(json::fieldString(json::parse(infoJson(labelled.config), &error), "label") == "Edge SRT");
+}
+
+TEST_CASE("the domain list carries the flows and marks the own domain")
+{
+    auto const root = std::filesystem::temp_directory_path() / "srtgw-flows-test";
+    std::filesystem::remove_all(root);
+    auto const video = root / "player" / "aaaaaaaa-0000-4000-8000-000000000001.mxl-flow";
+    auto const audio = root / "player" / "aaaaaaaa-0000-4000-8000-000000000002.mxl-flow";
+    std::filesystem::create_directories(video);
+    std::filesystem::create_directories(audio);
+    std::filesystem::create_directories(root / "player" / "not-a-flow");
+    std::ofstream(root / "player" / "domain_def.json") << "{\"id\":\"11111111-1111-4111-8111-111111111111\",\"label\":\"Player\"}";
+    std::ofstream(video / "flow_def.json")
+        << "{\"id\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"label\":\"Cam 1\",\"format\":\"urn:x-nmos:format:video\",\"media_type\":\"video/v210\","
+           "\"frame_width\":1920,\"frame_height\":1080,\"interlace_mode\":\"progressive\",\"grain_rate\":{\"numerator\":50,\"denominator\":1}}";
+    std::ofstream(audio / "flow_def.json")
+        << "{\"id\":\"aaaaaaaa-0000-4000-8000-000000000002\",\"label\":\"Cam 1 audio\",\"format\":\"urn:x-nmos:format:audio\",\"media_type\":\"audio/float32\",\"channel_count\":16}";
+    std::string error;
+    auto const listed = json::parse(domainsJson({DomainRecord{(root / "player").string(), "11111111-1111-4111-8111-111111111111", false}}, "11111111-1111-4111-8111-111111111111"), &error);
+    CHECK(error.empty());
+    auto const domains = json::field(listed, "domains");
+    REQUIRE(domains);
+    REQUIRE(domains->get<picojson::array>().size() == 1);
+    auto const& domain = domains->get<picojson::array>()[0];
+    CHECK(json::fieldString(domain, "label") == "Player");
+    CHECK(json::fieldBool(domain, "own", false));
+    auto const flows = json::field(domain, "flows");
+    REQUIRE(flows);
+    REQUIRE(flows->get<picojson::array>().size() == 2);
+    int width = 0;
+    int channels = 0;
+    for (auto const& flow : flows->get<picojson::array>())
+    {
+        width = std::max(width, json::fieldInt(flow, "frame_width", 0));
+        channels = std::max(channels, json::fieldInt(flow, "channel_count", 0));
+    }
+    CHECK(width == 1920);
+    CHECK(channels == 16);
+    std::filesystem::remove_all(root);
 }
 
 TEST_CASE("internet listener without a passphrase or streamid is rejected")

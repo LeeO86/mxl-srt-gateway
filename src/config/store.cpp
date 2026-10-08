@@ -177,20 +177,18 @@ void ConfigStore::replaceGlobals(std::map<std::string, std::string> const& value
         {"SHUTDOWN_TIMEOUT_S", std::to_string(loaded_.config.shutdownTimeoutS)},
         {"MXL_CLEANUP_ON_EXIT", loaded_.config.cleanupOnExit ? "true" : "false"},
     };
+    // Only a changed value needs a restart, and only once the change is accepted.
+    bool restart = loaded_.restartRequired;
     for (auto const& key : globalKeys())
     {
         auto const it = values.find(key);
         if (it != values.end())
         {
+            if (isRestartKey(key) && it->second != fileValues[key])
+            {
+                restart = true;
+            }
             fileValues[key] = it->second;
-            if (isRestartKey(key) && loaded_.origin[key] != ValueOrigin::Default)
-            {
-                loaded_.restartRequired = true;
-            }
-            if (isRestartKey(key))
-            {
-                loaded_.restartRequired = true;
-            }
         }
     }
     std::string channels = "[";
@@ -206,9 +204,9 @@ void ConfigStore::replaceGlobals(std::map<std::string, std::string> const& value
     }
     channels += "]";
     auto const filePath = loaded_.config.configFile;
-    auto reloaded = loadFromSources(fileValues, channels, {});
+    auto reloaded = loadFromSources(fileValues, channels, loaded_.env);
     reloaded.config.configFile = filePath;
-    reloaded.restartRequired = loaded_.restartRequired;
+    reloaded.restartRequired = restart;
     if (values.count("LOG_LEVEL") != 0)
     {
         reloaded.config.logLevel = values.at("LOG_LEVEL");
@@ -250,7 +248,7 @@ void ConfigStore::importJson(std::string const& text)
     auto const filePath = loaded_.config.configFile;
     std::lock_guard const lock{mutex_};
     auto const previous = loaded_.config.channels;
-    auto reloaded = loadFromSources(globals, channels, {});
+    auto reloaded = loadFromSources(globals, channels, loaded_.env);
     for (auto& channel : reloaded.config.channels)
     {
         bool passphraseSent = false;

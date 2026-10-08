@@ -94,6 +94,15 @@ HttpResponse Api::handle(HttpRequest const& request) const
             {
                 return text(200, nmosSummary_ ? nmosSummary_() : "{}");
             }
+            if (path.size() == 3 && path[2] == "info" && request.method == "GET")
+            {
+                return text(200, infoJson(store_.config()));
+            }
+            if (path.size() == 3 && path[2] == "domains" && request.method == "GET")
+            {
+                auto const config = store_.config();
+                return text(200, domainsJson(scanDomains(config.mxlDomainScanPath), config.mxlOutputDomainId));
+            }
             if (path.size() == 3 && path[2] == "config")
             {
                 if (request.method == "GET")
@@ -255,7 +264,7 @@ HttpResponse Api::handle(HttpRequest const& request) const
                     }
                     else if (json::has(body, "egress_preset"))
                     {
-                        patch += ",\"egress\":{\"preset\":\"" + json::fieldString(body, "egress_preset", "8x-stereo-aac") + "\"}";
+                        patch += ",\"egress\":{\"audio_preset\":\"" + json::fieldString(body, "egress_preset", "8x-stereo-aac") + "\"}";
                     }
                     patch += "}";
                     auto const channel = store_.upsertChannel(patch);

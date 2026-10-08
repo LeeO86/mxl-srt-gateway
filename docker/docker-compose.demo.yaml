@@ -16,7 +16,7 @@ services:
       - "3211:3211"
 
   egress:
-    image: ghcr.io/leeo86/mxl-srt-gateway:1.2.1
+    image: ghcr.io/leeo86/mxl-srt-gateway:1.3.0
     depends_on: [registry]
     environment:
       NMOS_REGISTRY_ADDRESS: registry
@@ -33,7 +33,7 @@ services:
       - "8120:8120"
 
   ingest:
-    image: ghcr.io/leeo86/mxl-srt-gateway:1.2.1
+    image: ghcr.io/leeo86/mxl-srt-gateway:1.3.0
     depends_on: [registry, egress]
     environment:
       NMOS_REGISTRY_ADDRESS: registry

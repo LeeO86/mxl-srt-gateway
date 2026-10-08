@@ -100,4 +100,47 @@ bool removeOwnDomain(std::string const& path, std::string const& id)
     log::info("mxl_domain_removed", {{"path", path}, {"id", id}});
     return true;
 }
+
+std::string domainsJson(std::vector<DomainRecord> const& domains, std::string const& ownId)
+{
+    std::string const suffix = ".mxl-flow";
+    picojson::array list;
+    for (auto const& domain : domains)
+    {
+        std::string error;
+        auto const def = json::parse(readText(std::filesystem::path(domain.path) / "domain_def.json"), &error);
+        picojson::object item;
+        item["id"] = picojson::value(domain.id);
+        item["label"] = picojson::value(json::fieldString(def, "label", ""));
+        item["path"] = picojson::value(domain.path);
+        item["mirror"] = picojson::value(domain.mirror);
+        item["own"] = picojson::value(domain.id == ownId);
+        picojson::array flows;
+        std::error_code ec;
+        for (auto const& entry : std::filesystem::directory_iterator(domain.path, ec))
+        {
+            auto const name = entry.path().filename().string();
+            if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0 || !entry.is_directory(ec))
+            {
+                continue;
+            }
+            auto const flowDef = json::parse(readText(entry.path() / "flow_def.json"), &error);
+            picojson::object flow;
+            flow["id"] = picojson::value(json::fieldString(flowDef, "id", name.substr(0, name.size() - suffix.size())));
+            for (char const* key : {"label", "format", "media_type", "frame_width", "frame_height", "interlace_mode", "grain_rate", "channel_count", "sample_rate"})
+            {
+                if (auto const value = json::field(flowDef, key))
+                {
+                    flow[key] = *value;
+                }
+            }
+            flows.emplace_back(flow);
+        }
+        item["flows"] = picojson::value(flows);
+        list.emplace_back(item);
+    }
+    picojson::object root;
+    root["domains"] = picojson::value(list);
+    return picojson::value(root).serialize();
+}
 } // namespace srtgw

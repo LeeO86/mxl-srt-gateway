@@ -311,11 +311,14 @@ corporate firewall. Therefore:
   (WebSocket), JPEG thumbnail of the current frame (low rate).
 - **Channels:** create/edit/delete ingest and egress channels with all settings
   above; changes apply per channel at runtime (only that channel restarts).
-- **Audio matrix** dialog per channel.
-- **NMOS:** node info, registration, senders/receivers with active parameters.
-- **Settings:** effective configuration, import/export, `KEY=value` export.
-- REST under `/api/v1/…` (channels CRUD, status, statistics, config), WebSocket
-  `/api/v1/events`; `/livez`, `/readyz`, `/statusz`, `/metrics` on `WEB_PORT`.
+- **Audio:** the matrix (ingest) or the tracks (egress) per channel.
+- **NMOS & MXL:** node info, registration, senders/receivers with active
+  parameters, the MXL domains and flows on the host (egress source picker).
+- **Status:** health, versions, process and GPU, per-channel counters.
+- **Settings:** effective configuration with origins, import/export, `KEY=value` export.
+- REST under `/api/v1/…` (channels CRUD, status, statistics, config, info,
+  domains), WebSocket `/api/v1/events`; `/livez`, `/readyz`, `/statusz`,
+  `/metrics` on `WEB_PORT`.
 - Unauthenticated by design (lab network), like the siblings; SRT passphrases are
   write-only in the UI and never returned by the API.
 
