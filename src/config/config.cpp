@@ -4,6 +4,7 @@
 #include "util/logging.hpp"
 #include "util/net.hpp"
 #include "util/uuid.hpp"
+#include "version.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -525,6 +526,9 @@ LoadedConfig loadFromSources(std::map<std::string, std::string> const& fileValue
     std::map<std::string, std::string> const& envValues)
 {
     LoadedConfig loaded;
+    loaded.env = envValues;
+    // A reload keeps the channels it is given (changed through the API since the start).
+    loaded.env.erase("SRTGW_CHANNELS_JSON");
     auto take = [&](std::string const& key, std::string const& fallback) {
         if (envValues.count(key) != 0)
         {
@@ -932,7 +936,18 @@ ChannelConfig channelFromJson(std::string const& text, ChannelConfig const* prev
         channel.egress.bframes = json::fieldInt(egress, "bframes", channel.egress.bframes);
         channel.egress.profile = json::fieldString(egress, "profile", channel.egress.profile);
         channel.egress.level = json::fieldString(egress, "level", channel.egress.level);
-        channel.egress.preset = json::fieldString(egress, "preset", channel.egress.preset);
+        // `preset` is the x264 preset. It also named the audio preset before `audio_preset`,
+        // so an audio preset name there still selects the tracks.
+        auto const preset = json::fieldString(egress, "preset", channel.egress.preset);
+        auto audioPreset = json::fieldString(egress, "audio_preset", "");
+        if (oneOf(preset, {"8x-stereo-aac", "16ch-302m", "5.1+stereo", "stereo"}))
+        {
+            audioPreset = audioPreset.empty() ? preset : audioPreset;
+        }
+        else
+        {
+            channel.egress.preset = preset;
+        }
         channel.egress.tune = json::fieldString(egress, "tune", channel.egress.tune);
         channel.egress.threads = std::clamp(json::fieldInt(egress, "threads", channel.egress.threads), 0, 64);
         channel.egress.nvencPreset = json::fieldString(egress, "nvenc_preset", channel.egress.nvencPreset);
@@ -957,9 +972,9 @@ ChannelConfig channelFromJson(std::string const& text, ChannelConfig const* prev
                 }
             }
         }
-        if (json::has(egress, "preset"))
+        if (!audioPreset.empty())
         {
-            channel.egress.audioTracks = presetEgress(json::fieldString(egress, "preset", "8x-stereo-aac"));
+            channel.egress.audioTracks = presetEgress(audioPreset);
         }
     }
     else if (previous == nullptr && channel.egress.audioTracks.empty())
@@ -1052,5 +1067,19 @@ std::string configToEnv(Config const& config)
     out << "SHUTDOWN_TIMEOUT_S=" << config.shutdownTimeoutS << "\n";
     out << "MXL_CLEANUP_ON_EXIT=" << (config.cleanupOnExit ? "true" : "false") << "\n";
     return out.str();
+}
+
+std::string infoJson(Config const& config)
+{
+    picojson::object obj;
+    obj["version"] = picojson::value(std::string(kVersion));
+    obj["mxl"] = picojson::value(std::string(kMxlRef));
+    obj["nmos_cpp"] = picojson::value(std::string(kNmosCppRef));
+    obj["srt"] = picojson::value(std::string(kSrtRef));
+    obj["ffmpeg"] = picojson::value(std::string(kFfmpegRef));
+    obj["label"] = picojson::value(config.nmosLabel.empty() ? config.hostId : config.nmosLabel);
+    obj["host_address"] = picojson::value(config.hostAddress);
+    obj["config_file"] = picojson::value(config.configFile);
+    return picojson::value(obj).serialize();
 }
 } // namespace srtgw

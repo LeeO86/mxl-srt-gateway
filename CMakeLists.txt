@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-srt-gateway
-    VERSION 1.2.1
+    VERSION 1.3.0
     DESCRIPTION "SRT contribution gateway for MXL"
     LANGUAGES CXX
 )
@@ -126,6 +126,23 @@ if(SRTGW_HAVE_MEDIA)
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/main.js
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/App.vue
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/style.css
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/api.js
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/store.js
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/AudioTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelPicker.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelTile.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/ChannelsTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/DashboardTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/IdCode.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Meters.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/NmosTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/OriginBadge.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Pill.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/RoutePanel.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/Segmented.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingsTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SrtEndpoint.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/StatusTab.vue
     )
     set(WEBUI_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/ops/webui_generated.hpp)
     option(SRTGW_USE_PREBUILT_WEBUI "Embed web/dist/index.html instead of running npm" OFF)

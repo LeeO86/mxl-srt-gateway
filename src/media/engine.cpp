@@ -1262,6 +1262,8 @@ void IngestPipeline::runIo()
                                 std::lock_guard const lock{shared_->mediaMu};
                                 auto& queue = shared_->audio[static_cast<std::size_t>(dec.index)];
                                 queue.channels = channels;
+                                // The stream often says 0 channels until the first frame is decoded (AAC in TS).
+                                queue.info.layout = std::to_string(channels) + "ch";
                                 queue.samples.insert(queue.samples.end(), converted.begin(), converted.begin() + static_cast<std::ptrdiff_t>(got * channels));
                                 queue.missing = false;
                                 queue.lastMs = monoNowMs();

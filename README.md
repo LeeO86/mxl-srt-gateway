@@ -95,11 +95,23 @@ the secret; they are never logged and are omitted from the API unless
 set, the Query API lists this node. `/livez` is 200 while the process is up.
 `/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix.
 
-REST, all under `/api/v1`: `GET /status`, `GET /nmos`, `GET|PUT /config`,
-`GET /config/export` (`?format=env`, `?secrets=1`), `POST /config/import`,
-`GET|POST /channels`, `GET|PUT|DELETE /channels/:id`, `PUT /channels/:id/matrix`,
+REST, all under `/api/v1`: `GET /status`, `GET /info`, `GET /nmos`,
+`GET /domains`, `GET|PUT /config`, `GET /config/export` (`?format=env`,
+`?secrets=1`), `POST /config/import`, `GET|POST /channels`,
+`GET|PUT|DELETE /channels/:id`, `PUT /channels/:id/matrix`,
 `POST /channels/:id/route`, `GET /channels/:id/status`, `GET /channels/:id/thumbnail`,
-WebSocket `/api/v1/events`.
+WebSocket `/api/v1/events`. `GET /info` has the versions, the node label, the
+announced address and the config file. `GET /domains` lists the MXL domains
+under `MXL_DOMAIN_SCAN_PATH` with their flows. `egress.preset` is the x264
+preset; `egress.audio_preset` picks the audio tracks (`8x-stereo-aac`,
+`16ch-302m`, `5.1+stereo`, `stereo`).
+
+The web UI on `WEB_PORT` has the tabs Dashboard (every channel with picture,
+SRT statistics and meters), Channels (all channel settings, new, enable,
+delete, the egress MXL source), Audio (ingest matrix, egress tracks), NMOS &
+MXL, Status and Settings (origins, export, import). Edits stay drafts until
+they are applied, across tab switches and reconnects. Passphrases are
+write-only.
 
 On the platform, set `NMOS_HOST_ADDRESS` to the pod IP (or the node IP on a
 host network), `NMOS_SEED` to `<production>-srtgw`, `NMOS_LABEL` and

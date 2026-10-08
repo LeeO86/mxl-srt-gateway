@@ -69,6 +69,24 @@ assert s["frames"] >= max(10, need * 10), s
 print("ingest", s["state"], s["frames"], s["decoder"])
 PY
 
+# Info, the decoded track's channel count, the domain list with the ingest's own flow, and the
+# egress audio tracks next to the x264 preset.
+python3 - <<'PY'
+import json, urllib.request
+base = "http://127.0.0.1:18120/api/v1"
+info = json.load(urllib.request.urlopen(base + "/info"))
+assert info["version"] and info["config_file"].endswith("config.json"), info
+status = json.load(urllib.request.urlopen(base + "/channels/ingest-listen/status"))
+assert status["tracks"] and status["tracks"][0]["layout"] == "1ch", status["tracks"]
+flow = status["flows"]["video"]
+domains = json.load(urllib.request.urlopen(base + "/domains"))["domains"]
+own = [d for d in domains if d["own"]]
+assert own and any(f["id"] == flow and f.get("frame_width") == 1280 for f in own[0]["flows"]), domains
+out = json.load(urllib.request.urlopen(base + "/channels/egress-listen"))["egress"]
+assert out["preset"] == "ultrafast" and out["audio_tracks"][0]["language"] == "eng", out
+print("info", info["version"], "domains", len(domains))
+PY
+
 ffmpeg -hide_banner -loglevel info -i "srt://127.0.0.1:19002?mode=caller&transtype=live&latency=200" -t 1 -f null - \
   > "$WORK/recv.log" 2>&1 || true
 grep -q "1280x720" "$WORK/recv.log"

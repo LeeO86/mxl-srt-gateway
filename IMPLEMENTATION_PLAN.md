@@ -90,6 +90,17 @@ both.
    channel to the CPU graph. Egress adapts v210 on the CPU (that packing is
    not a `scale_cuda` input) and then tries NVENC.
 6. **Rendezvous** is implemented (`SRTO_RENDEZVOUS`) but not required by the tests.
+7. **Web UI (1.3.0).** Split into components like the sibling UIs (shared
+   `style.css` tokens, `Pill`, `Segmented`, `OriginBadge`, `IdCode`). The audio
+   matrix is a tab, not a dialog. Channel, matrix, route and settings edits are
+   drafts in `web/src/store.js`. `audio_offset_ms` and `egress.profile` /
+   `egress.level` are accepted by the API but not applied by the engine, so the
+   UI has no control for them. The egress source picker uses
+   `GET /api/v1/domains` and `POST /channels/:id/route`; that route does not
+   change the receivers' IS-05 active parameters, and the next activation
+   replaces it. Without `SRTGW_CONFIG_FILE` the Settings tab only edits
+   `LOG_LEVEL` (a restart would forget the others). The export with
+   passphrases is a download only.
 
 ## MXL calls that matter
 
