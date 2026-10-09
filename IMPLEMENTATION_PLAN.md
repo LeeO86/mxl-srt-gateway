@@ -106,12 +106,18 @@ both.
    compensation (`swr_set_compensation` does nothing with it), so up to 1.3.0
    the audio FIFO kept its start-up fill (0.6–1.1 s) and the audio was that
    much late against the video. The decoder now records each audio queue's
-   source PTS and the video's PTS-to-TAI offset; before each grain the writer
-   drops or inserts samples when the queue's first sample is more than 20 ms
-   from its mapped time + `sync_latency_ms` + half a grain
-   (`audioHeadCorrection` in `src/media/framesync.cpp`). A drifting source
-   therefore gets a 20 ms step now and then instead of a resampled slope.
-   `audio_drift_ppm` counts those steps per sample written.
+   source PTS and the video's PTS-to-TAI offset. Before each grain the writer
+   takes the error of the queue's first sample against its mapped time +
+   `sync_latency_ms` + half a grain; when the mean over 25 grains is beyond
+   20 ms it drops or inserts that many samples at once (`AudioAligner` in
+   `src/media/framesync.cpp`). A drifting source, or a decoder that falls
+   behind and drags the video mapping with it, therefore gets a step (a click)
+   now and then instead of a resampled slope. `audio_drift_ppm` counts those
+   steps per sample written. Open: small errors through the default swr
+   engine's `swr_set_compensation` (soxr has none), steps only for large ones;
+   a source whose audio arrives more than `sync_latency_ms` after its video
+   (FFmpeg's TS muxer sends audio in bursts) stays late by the difference,
+   and the ingest frame queue (8 frames) caps `sync_latency_ms` at ~150 ms.
 
 ## MXL calls that matter
 

@@ -209,8 +209,9 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
   its source timestamps. Before each grain, the writer lines the queue up with
   the video: the first queued sample plays at its mapped presentation time +
   `sync_latency_ms` (half a grain later, like the frame the synchroniser shows).
-  More than 20 ms off, it drops the older samples or inserts silence; without a
-  video mapping it holds the queue at `sync_latency_ms`. Output is always at
+  When the mean error over 25 grains is more than 20 ms, it drops the older
+  samples or inserts silence; without a video mapping it holds the queue at
+  `sync_latency_ms`. Output is always at
   exactly the grain cadence (e.g. 960 samples per grain at 50, 1601/1602
   cadence at 59.94). `audio_drift_ppm` is the net of dropped (+) and inserted
   (−) samples per sample written after the first alignment.
