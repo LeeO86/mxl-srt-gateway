@@ -32,8 +32,8 @@ Design principles:
    crosspoint like every other media function.
 2. **The MXL timeline is TAI.** SRT sources are not locked to the facility clock.
    Ingest therefore always runs a frame synchroniser: video repeats/drops frames,
-   audio is resampled with drift compensation. The MXL output never stalls and
-   never runs ahead of TAI.
+   audio follows the video timeline by dropping or inserting samples. The MXL
+   output never stalls and never runs ahead of TAI.
 3. **Compressed edge, own timing core.** Demux, decode, encode and mux use the
    FFmpeg libraries (libavformat, libavcodec, libavfilter, libswresample), SRT uses
    libsrt directly. Timing, frame sync and MXL I/O are own C++ code, not driven by
@@ -54,7 +54,7 @@ SCTE-35, subtitles/teletext, HDR, ST 2110, RTMP/RIST/WebRTC, recording.
  INGEST channel
  libsrt (caller/listener) ─► TS demux (libavformat, custom AVIO)
    ─► video decode (NVDEC | CPU) ─► format adapter (CUDA | CPU filters)
-   ─► audio decode ─► channel map ─► async resampler (drift control)
+   ─► audio decode ─► resampler ─► audio queue (aligned to video PTS) ─► channel map
    ─► frame synchroniser (TAI clock) ─► MXL writers (v210, float32)
 
  EGRESS channel
@@ -205,10 +205,15 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 - Source timestamps are mapped to the local timeline with a smoothed offset; the
   synchroniser **repeats** a frame when the source is slow and **drops** one when
   it is fast. Repeat/drop events are counted (metrics) and spaced, not bursty.
-- Audio uses an asynchronous resampler (libswresample with soxr and drift
-  compensation) that keeps the audio FIFO at its target fill level; output is
-  always 48 kHz float32 at exactly the grain cadence (e.g. 960 samples per grain
-  at 50, 1601/1602 cadence at 59.94).
+- Audio is resampled to 48 kHz float32 (libswresample with soxr) and queued with
+  its source timestamps. Before each grain, the writer lines the queue up with
+  the video: the first queued sample plays at its mapped presentation time +
+  `sync_latency_ms` (half a grain later, like the frame the synchroniser shows).
+  More than 20 ms off, it drops the older samples or inserts silence; without a
+  video mapping it holds the queue at `sync_latency_ms`. Output is always at
+  exactly the grain cadence (e.g. 960 samples per grain at 50, 1601/1602
+  cadence at 59.94). `audio_drift_ppm` is the net of dropped (+) and inserted
+  (−) samples per sample written after the first alignment.
 - Lip sync: video and audio share the same mapped timeline; a per-channel
   `audio_offset_ms` (±) corrects source offsets.
 - Loss of signal: hold the last frame for `hold_ms` (default 500), then black or

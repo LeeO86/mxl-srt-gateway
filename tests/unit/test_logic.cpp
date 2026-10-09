@@ -513,6 +513,41 @@ TEST_CASE("frame synchroniser resyncs when the next frames have left the buffer"
     CHECK(next.dropped == 0);
 }
 
+TEST_CASE("audio aligner lines the audio up with the video")
+{
+    std::int64_t const ms = 1000000;
+    // 1.3.0 on the lab: the queue kept ~1 s of start-up audio, its first sample ~960 ms older
+    // than the sync latency asks for. After one window all of it is dropped at once.
+    AudioAligner late;
+    for (int grain = 0; grain < 24; ++grain)
+    {
+        CHECK(late.add(960 * ms) == 0);
+    }
+    CHECK(late.add(960 * ms) == 960 * 48);
+    // Audio due later than the output: silence is inserted in front of it.
+    AudioAligner early;
+    std::int64_t inserted = 0;
+    for (int grain = 0; grain < 25; ++grain)
+    {
+        inserted += early.add(-70 * ms);
+    }
+    CHECK(inserted == -70 * 48);
+    // Decoder bursts: +-60 ms of jitter around a 10 ms error averages out, nothing moves.
+    AudioAligner jitter;
+    for (int grain = 0; grain < 250; ++grain)
+    {
+        CHECK(jitter.add((grain % 2 == 0 ? 70 : -50) * ms) == 0);
+    }
+    // A mean just beyond the tolerance is corrected.
+    AudioAligner edge;
+    std::int64_t dropped = 0;
+    for (int grain = 0; grain < 25; ++grain)
+    {
+        dropped += edge.add(21 * ms);
+    }
+    CHECK(dropped == 21 * 48);
+}
+
 TEST_CASE("channel map applies gain and silence")
 {
     std::vector<float> stereo(8);
@@ -527,10 +562,18 @@ TEST_CASE("channel map applies gain and silence")
     TrackView track;
     track.channels = 2;
     track.samples = stereo.data();
+    track.frames = 4;
     std::vector<float> mixed(8, 1.f);
     applyMatrix({track}, output, 4, mixed.data());
     CHECK(mixed[0] == doctest::Approx(dbToLinear(-6.0)).epsilon(0.001));
     CHECK(mixed[1] == doctest::Approx(0.0));
+    // A queue shorter than the grain: what it holds, then silence (no read past its end).
+    TrackView shortQueue = track;
+    shortQueue.frames = 3;
+    std::vector<float> partial(8, 1.f);
+    applyMatrix({shortQueue}, output, 4, partial.data());
+    CHECK(partial[4] == doctest::Approx(dbToLinear(-6.0)).epsilon(0.001));
+    CHECK(partial[6] == doctest::Approx(0.0));
     TrackView missing = track;
     missing.missing = true;
     std::vector<float> silent(4, 1.f);

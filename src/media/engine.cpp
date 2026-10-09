@@ -553,8 +553,15 @@ struct IngestPipeline::Shared
         bool missing = true;
         TrackStatus info;
         std::int64_t lastMs = 0;
+        // Source PTS (ns) just after the last queued sample; ptsValid once a frame carried one.
+        std::int64_t endPtsNs = 0;
+        bool ptsValid = false;
+        AudioAligner aligner;
     };
     std::vector<AudioQ> audio;
+    // The source PTS -> TAI offset (ns) the video frames are stamped with.
+    std::int64_t ptsOffsetNs = 0;
+    bool haveOffset = false;
     std::string decoder;
     std::string sourceFormat;
     VideoFormat source;
@@ -946,6 +953,9 @@ void IngestPipeline::runIo()
             }
             shared_->audio[static_cast<std::size_t>(dec.index)].info = info;
             shared_->audio[static_cast<std::size_t>(dec.index)].channels = fmt->streams[index]->codecpar->ch_layout.nb_channels;
+            shared_->audio[static_cast<std::size_t>(dec.index)].ptsValid = false;
+            shared_->audio[static_cast<std::size_t>(dec.index)].aligner = AudioAligner{};
+            shared_->haveOffset = false;
         }
 
         AVFilterGraph* graph = nullptr;
@@ -1145,6 +1155,8 @@ void IngestPipeline::runIo()
                             }
                             {
                                 std::lock_guard const lock{shared_->mediaMu};
+                                shared_->ptsOffsetNs = static_cast<std::int64_t>(offset);
+                                shared_->haveOffset = true;
                                 shared_->frames.push_back(std::move(adapted));
                                 while (shared_->frames.size() > 8)
                                 {
@@ -1258,7 +1270,6 @@ void IngestPipeline::runIo()
                             int const got = swr_convert(dec.swr, outPlanes, outCount, inPlanes, frame->nb_samples);
                             if (got > 0)
                             {
-                                int const levelTarget = std::max(48, config_.syncLatencyMs * 48);
                                 std::lock_guard const lock{shared_->mediaMu};
                                 auto& queue = shared_->audio[static_cast<std::size_t>(dec.index)];
                                 queue.channels = channels;
@@ -1267,19 +1278,17 @@ void IngestPipeline::runIo()
                                 queue.samples.insert(queue.samples.end(), converted.begin(), converted.begin() + static_cast<std::ptrdiff_t>(got * channels));
                                 queue.missing = false;
                                 queue.lastMs = monoNowMs();
-                                int const level = static_cast<int>(queue.samples.size() / static_cast<std::size_t>(channels));
-                                int const error = level - levelTarget;
-                                if (std::abs(error) > levelTarget / 5)
+                                // The writer lines the queue up with the video by these stamps.
+                                std::int64_t const pts = frame->pts != AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
+                                std::int64_t const duration = static_cast<std::int64_t>(got) * 1000000000LL / 48000;
+                                if (pts != AV_NOPTS_VALUE)
                                 {
-                                    swr_set_compensation(dec.swr, error > 0 ? -40 : 40, 4800);
+                                    queue.endPtsNs = av_rescale_q(pts, fmt->streams[dec.stream]->time_base, AVRational{1, 1000000000}) + duration;
+                                    queue.ptsValid = true;
                                 }
-                                if (level > levelTarget + 48000)
+                                else
                                 {
-                                    int const drop = channels * 480;
-                                    if (static_cast<int>(queue.samples.size()) > drop)
-                                    {
-                                        queue.samples.erase(queue.samples.begin(), queue.samples.begin() + drop);
-                                    }
+                                    queue.endPtsNs += duration;
                                 }
                             }
                         }
@@ -1342,6 +1351,11 @@ void IngestPipeline::runClock()
     std::uint64_t drops = 0;
     std::uint64_t frames = 0;
     std::int64_t lastJpeg = 0;
+    // Audio drift: samples dropped (+) or inserted (-) on the first track after its first
+    // alignment, per sample written since then.
+    bool audioAligned = false;
+    std::int64_t driftCorrected = 0;
+    std::int64_t driftWritten = 0;
     // MXL interlaced flows: one grain per field (see the video write below).
     bool const fieldGrains = config_.target.interlaced;
     bool const topFieldFirst = config_.target.fieldOrder != "bff";
@@ -1375,6 +1389,49 @@ void IngestPipeline::runClock()
             }
             sourceFormat = shared_->sourceFormat;
             decoder = shared_->decoder;
+            // Line each audio queue up with the video: its first sample plays at the time its PTS
+            // maps to plus the sync latency, half a grain later like the frame the synchroniser
+            // shows. Without a video mapping the queue is held at the sync latency.
+            auto const outputNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index));
+            auto const grainNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index + 1)) - outputNs;
+            std::int64_t const latencyNs = static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL;
+            for (std::size_t q = 0; q < shared_->audio.size(); ++q)
+            {
+                auto& live = shared_->audio[q];
+                if (live.channels <= 0 || live.samples.empty())
+                {
+                    continue;
+                }
+                auto const queued = static_cast<std::int64_t>(live.samples.size() / static_cast<std::size_t>(live.channels));
+                std::int64_t const levelNs = queued * 1000000000LL / 48000;
+                std::int64_t headNs = outputNs - levelNs;
+                std::int64_t targetNs = outputNs - latencyNs;
+                std::int64_t const mappedNs = live.endPtsNs + shared_->ptsOffsetNs - levelNs;
+                if (shared_->haveOffset && live.ptsValid && std::llabs(mappedNs - (targetNs - grainNs / 2)) < 2000000000LL)
+                {
+                    headNs = mappedNs;
+                    targetNs -= grainNs / 2;
+                }
+                std::int64_t const correction = live.aligner.add(targetNs - headNs);
+                if (correction > 0)
+                {
+                    auto const drop = static_cast<std::ptrdiff_t>(std::min(correction, queued) * live.channels);
+                    live.samples.erase(live.samples.begin(), live.samples.begin() + drop);
+                }
+                else if (correction < 0)
+                {
+                    live.samples.insert(live.samples.begin(), static_cast<std::size_t>(-correction * live.channels), 0.f);
+                }
+                if (q == 0)
+                {
+                    // Steps after the first alignment follow the source audio clock: the drift.
+                    if (audioAligned)
+                    {
+                        driftCorrected += correction;
+                    }
+                    audioAligned = audioAligned || (correction == 0 && live.aligner.count == 0);
+                }
+            }
             audioCopy = shared_->audio;
             auto const now = monoNowMs();
             if (shared_->decodeWindowMs != 0 && now > shared_->decodeWindowMs)
@@ -1466,7 +1523,11 @@ void IngestPipeline::runClock()
         }
         std::vector<TrackView> views;
         double fifoMs = 0;
-        double drift = 0;
+        if (audioAligned)
+        {
+            driftWritten += samples;
+        }
+        double const drift = driftWritten > 0 ? static_cast<double>(driftCorrected) * 1000000.0 / static_cast<double>(driftWritten) : 0.0;
         for (auto& queue : audioCopy)
         {
             bool const stale = queue.lastMs != 0 && monoNowMs() - queue.lastMs > 1000 && queue.samples.empty();
@@ -1478,13 +1539,12 @@ void IngestPipeline::runClock()
             TrackView view;
             view.channels = queue.channels;
             view.samples = queue.samples.empty() ? nullptr : queue.samples.data();
+            view.frames = queue.channels > 0 ? static_cast<int>(queue.samples.size() / static_cast<std::size_t>(queue.channels)) : 0;
             view.missing = queue.samples.empty();
             views.push_back(view);
             if (queue.channels > 0)
             {
                 fifoMs = std::max(fifoMs, static_cast<double>(queue.samples.size() / static_cast<std::size_t>(queue.channels)) / 48.0);
-                double const target = static_cast<double>(config_.syncLatencyMs);
-                drift = (fifoMs - target) / std::max(1.0, target) * 1000000.0;
             }
         }
         bool consumed = false;

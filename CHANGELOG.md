@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1
+
+### Fixes
+
+- Ingest audio was written to MXL up to about a second later than the matching video. The audio FIFO kept whatever piled up while the stream started (stream probing, slate time), often 0.6–1.1 s, and nothing brought it back to the 120 ms target: the soxr resampler ignores `swr_set_compensation`, and the hard trim only started 1 s above the target. Measured on the lab with the mxl-test-player A/V sync pattern (egress → SRT → ingest, 1080p50, against the player's own flows): 1.2.1 and 1.3.0 wrote the beep 900 ms (FIFO 1090 ms) or 460 ms (FIFO 650 ms) after the flash, and 100 ms early after an audio gap had drained the FIFO. The audio queue now keeps the source timestamps, and before each grain the writer lines it up with the video's PTS-to-TAI mapping (drop the older samples or insert silence when it is more than 20 ms off). Without video, the queue is held at `sync_latency_ms`.
+- `audio_drift_ppm` was the FIFO level error × 10⁶ (8,000,000 at a 1 s FIFO). It is now the net of samples dropped (+) and inserted (−) per sample written after the first alignment, so the source audio clock against TAI.
+- The Compose and Kubernetes examples use the `1.3.1` image.
+
 ## 1.3.0
 
 - New web UI in the look of the other LeeO86 media functions (mxl-webrtc-monitor, mxl-test-player, mxl-replay, mxl-multiviewer, mxl-st2110-gateway, mxl-browser-source): header with the node label, channel counts, running, waiting, failed, alarm, registration and connection pills and the versions; banners for a lost API, lost live updates, a needed restart and an action's result or error; tabs in the URL hash; light and dark theme. Every API function has a control:

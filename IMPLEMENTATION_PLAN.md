@@ -101,6 +101,17 @@ both.
    replaces it. Without `SRTGW_CONFIG_FILE` the Settings tab only edits
    `LOG_LEVEL` (a restart would forget the others). The export with
    passphrases is a download only.
+8. **Audio alignment (1.3.1).** The specification asks for an asynchronous
+   resampler with drift compensation; soxr in libswresample has no
+   compensation (`swr_set_compensation` does nothing with it), so up to 1.3.0
+   the audio FIFO kept its start-up fill (0.6–1.1 s) and the audio was that
+   much late against the video. The decoder now records each audio queue's
+   source PTS and the video's PTS-to-TAI offset; before each grain the writer
+   drops or inserts samples when the queue's first sample is more than 20 ms
+   from its mapped time + `sync_latency_ms` + half a grain
+   (`audioHeadCorrection` in `src/media/framesync.cpp`). A drifting source
+   therefore gets a 20 ms step now and then instead of a resampled slope.
+   `audio_drift_ppm` counts those steps per sample written.
 
 ## MXL calls that matter
 

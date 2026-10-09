@@ -90,4 +90,21 @@ void FrameSynchroniser::reset()
     hasLast_ = false;
     lastIndex_ = -1;
 }
+
+std::int64_t AudioAligner::add(std::int64_t errorNs)
+{
+    sumNs += errorNs;
+    if (++count < window)
+    {
+        return 0;
+    }
+    std::int64_t const mean = sumNs / count;
+    sumNs = 0;
+    count = 0;
+    if (mean >= -toleranceNs && mean <= toleranceNs)
+    {
+        return 0;
+    }
+    return mean * 48 / 1000000;
+}
 } // namespace srtgw
