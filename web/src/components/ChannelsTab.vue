@@ -169,6 +169,8 @@ const problems = computed(() => {
   if (x.backup.enabled) out.push(...endpointProblems(x.backup.endpoint, egress.value ? "Second destination" : "Backup input"));
   if (x.target.scan === "interlaced" && (x.target.width !== 1920 || !["25", "29.97"].includes(x.target.rate))) out.push("Interlaced is 1920×1080 at 25 or 29.97 frames only.");
   if (egress.value && x.egress.codec === "hevc" && x.target.scan === "interlaced") out.push("HEVC cannot be interlaced.");
+  if (!(x.sync_latency_ms >= 0 && x.sync_latency_ms <= 2000)) out.push("The sync latency must be 0–2000 ms.");
+  if (!(x.audio_offset_ms >= -1000 && x.audio_offset_ms <= 1000)) out.push("The audio offset must be −1000 to 1000 ms.");
   return out;
 });
 
@@ -460,6 +462,10 @@ const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
           <div>
             <label>Then show</label>
             <Segmented v-model="d.loss_mode" :options="LOSS" label="Signal loss" />
+          </div>
+          <div>
+            <label for="fs-aoff">Audio offset in ms (+: later)</label>
+            <input id="fs-aoff" v-model.number="d.audio_offset_ms" type="number" min="-1000" max="1000" step="1" :class="cls('audio_offset_ms')" />
           </div>
         </div>
         <p class="note">

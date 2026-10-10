@@ -310,6 +310,43 @@ TEST_CASE("listener ports must sit inside the configured range")
     CHECK_THROWS_AS(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}), ConfigError);
 }
 
+TEST_CASE("sync latency and audio offset stay within their ranges")
+{
+    auto channel = defaultIngest("in", 9000);
+    channel.syncLatencyMs = 2000;
+    channel.audioOffsetMs = -1000;
+    CHECK(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}).config.channels.size() == 1);
+    channel.syncLatencyMs = 2001;
+    CHECK_THROWS_AS(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}), ConfigError);
+    channel.syncLatencyMs = 120;
+    channel.audioOffsetMs = 1000.5;
+    CHECK_THROWS_AS(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}), ConfigError);
+}
+
+TEST_CASE("an audio slice that wraps the ring is read from both fragments")
+{
+    // Two channel rings of 8 samples, 16 floats apart (MXL pages them): channel c, position i
+    // holds c * 100 + i.
+    std::vector<float> rings(32, -1.f);
+    for (int c = 0; c < 2; ++c)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            rings[static_cast<std::size_t>(c * 16 + i)] = static_cast<float>(c * 100 + i);
+        }
+    }
+    auto const* ring = reinterpret_cast<std::uint8_t const*>(rings.data());
+    std::size_t const stride = 16 * sizeof(float);
+    // 5 samples from position 6: 6 and 7 at the end of the ring, then 0, 1 and 2 at its start.
+    // 1.3.1 left the last three silent (once per ring, every ~2 s on the lab).
+    std::vector<float> out(10, 0.f);
+    interleaveSlice({ring + 6 * sizeof(float), 2 * sizeof(float)}, {ring, 3 * sizeof(float)}, stride, 2, 5, out.data(), 2);
+    CHECK(out == std::vector<float>{6, 106, 7, 107, 0, 100, 1, 101, 2, 102});
+    // No wrap: one fragment.
+    interleaveSlice({ring + sizeof(float), 5 * sizeof(float)}, {}, stride, 2, 5, out.data(), 2);
+    CHECK(out == std::vector<float>{1, 101, 2, 102, 3, 103, 4, 104, 5, 105});
+}
+
 TEST_CASE("audio cadence is exact")
 {
     for (int i = 0; i < 100; ++i)

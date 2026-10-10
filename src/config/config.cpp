@@ -452,6 +452,15 @@ void validateConfig(Config const& config)
         {
             error += channel.id + " loss mode must be slate or black; ";
         }
+        // The ingest frame queue holds sync_latency_ms of frames.
+        if (channel.syncLatencyMs < 0 || channel.syncLatencyMs > 2000)
+        {
+            error += channel.id + " sync_latency_ms must be 0-2000; ";
+        }
+        if (channel.audioOffsetMs < -1000 || channel.audioOffsetMs > 1000)
+        {
+            error += channel.id + " audio_offset_ms must be -1000 to 1000; ";
+        }
         if (channel.audioOutputs.empty())
         {
             error += channel.id + " needs an audio output; ";

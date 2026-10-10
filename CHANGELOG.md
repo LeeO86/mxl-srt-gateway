@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.2
+
+### Fixes
+
+Measured on the lab host (1080p50; egress with NVENC on 4 CPUs, ingest with CPU decode on 4 others; load = 2 busy loops on each egress CPU; benches in `~/mxl-lab/avs3/`).
+
+- Egress read its audio at the output grain while its video came `read_offset_grains` (default 2) grains earlier, so the audio left 40 ms early, and each read waited up to 20 ms for samples still being written. On a busy host the loop then fell behind and skipped grains, and a read that timed out sent silence. The audio is now read at the same offset as the video. Each AAC frame was also stamped with its grain's start rather than its first sample, up to 20 ms later and not continuous (FFmpeg reported non-monotonic timestamps). It now carries its first sample's time. Measured:
+  - egress drops: 1.3.1 0.3–1.0/s idle and 2.3–3.0/s under load; now 0 in both;
+  - the egress's own A/V timing in its MPEG-TS against the test player's pattern: 1.3.1 audio −59…−40 ms (early); now 0 ms in 7 of 8 runs (one at −20 ms, one grain). FFmpeg's own AAC encode → MPEG-TS → decode chain adds +21 ms (its 1024-sample priming; MP2 +10, AC-3 +5), the same with an ideal FFmpeg source; that is not included above.
+- `MxlAudioReader::read` dropped the second part of a slice that wraps the ring and left up to a grain of zeros in the egress audio once per ring (every 2.005 s on the test player's flow). Both parts are copied now. Steady tone through egress → SRT → ingest, 60 s each: 1.3.1 79 silences (1.96 s) idle and 77 (4.28 s) under load; now none and no clicks.
+- `audio_offset_ms` was accepted but not applied. As `SPECIFICATION.md` §5.4 says, it now corrects a source's lip sync on ingest: + plays the audio later, − earlier, −1000 to 1000 ms. Egress ignores it. The UI has the field under the frame sync settings.
+- The ingest frame queue held 8 frames, about 150 ms at 50p, so a `sync_latency_ms` much above the 120 ms default never found a frame old enough: with 300 ms the channel stayed on the slate (`no_signal`). The queue now holds `sync_latency_ms` + 100 ms of frames, at least 8. `sync_latency_ms` must be 0–2000, which keeps the queue bounded (2000 ms at 1080p50: about 105 frames, up to about 580 MB). With 300 ms: 1.3.1 `no_signal`; now `running`, the loop's A/V offset −1…+19 ms (video quantised to 20 ms).
+- `audio_drift_ppm` carried the correction after the start-up step for minutes. The first 10 s after an alignment are no longer counted. FFmpeg source with no real drift, every 15 s for 150 s: 1.3.1 249, 228, 188, 145, 129, 83, 68, 72, 19, 41 ppm; now 8, 7, −1, −2, 13, 12, −1, −4, 1, 12 ppm.
+- The Compose and Kubernetes examples use the `1.3.2` image.
+
 ## 1.3.1
 
 ### Fixes

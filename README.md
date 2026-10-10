@@ -144,10 +144,22 @@ slower, so a drifting source or a decoder that falls behind does not click. An
 error beyond 100 ms (a timestamp jump, a long stall) is stepped again. Audio
 that arrives in bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer
 does that) is held back until the queue no longer runs dry, and released
-slowly: a little late rather than with gaps. In the channel status,
+slowly: a little late rather than with gaps. `audio_offset_ms` (−1000 to 1000,
++: later) moves an ingest channel's audio against its video, for a source that
+is out of lip sync; egress ignores it. In the channel status,
 `audio_fifo_ms` is the queued audio and `audio_drift_ppm` the first track's
-resampling correction, averaged over about a minute (+: the source audio runs
-fast against TAI). The thresholds are fixed (`SPECIFICATION.md` §5.4).
+resampling correction, averaged over about a minute from 10 s after the
+alignment (+: the source audio runs fast against TAI). The thresholds are
+fixed (`SPECIFICATION.md` §5.4).
+
+`sync_latency_ms` (default 120, at most 2000) is how far the ingest's output
+lags the source's mapped time. The ingest queues that much decoded video plus
+100 ms (at least 8 frames); a queued 1080p frame takes 3–5.5 MB, so 2000 ms
+at 50p holds up to about 580 MB per channel.
+
+Egress reads each output grain's video and audio `egress.read_offset_grains`
+(default 2) source frames before its time, so that the writer has finished
+them, and stamps each encoded audio frame with the time of its first sample.
 
 ## Layout
 
