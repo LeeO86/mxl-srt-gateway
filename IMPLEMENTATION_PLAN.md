@@ -101,6 +101,67 @@ both.
    replaces it. Without `SRTGW_CONFIG_FILE` the Settings tab only edits
    `LOG_LEVEL` (a restart would forget the others). The export with
    passphrases is a download only.
+8. **Audio alignment (1.3.1).** The specification asks for an asynchronous
+   resampler with drift compensation; soxr in libswresample has no
+   compensation (`swr_set_compensation` fails with it), so up to 1.3.0 the
+   audio FIFO kept its start-up fill (0.6–1.1 s) and the audio was that much
+   late against the video. The decoder now records each audio queue's source
+   PTS and the video's PTS-to-TAI offset. Before each grain the writer takes
+   the error of the queue's first sample against its mapped time +
+   `sync_latency_ms` + half a grain and hands it to `AudioAligner`
+   (`src/media/framesync.cpp`), which acts on the mean of 25 grains:
+   - until a mean is within 20 ms (start-up: the video offset settles over
+     2–3 s), it drops or inserts that many samples at once;
+   - once aligned, it sets a speed of mean / 2 s, at most ±0.5 %; the IO
+     thread passes it to `swr_set_compensation` with every decoded frame
+     (over 2^20 output samples, so it never runs out between frames);
+   - a mean beyond 100 ms is stepped again and the alignment starts over;
+   - the error is taken against a hold (`holdNs`): per grain, error minus
+     headroom (queued audio beyond the grain) is how much later the audio
+     would have to be for the queue to just last; the hold rises at once to
+     the window's worst of that + 10 ms and falls by at most 0.5 ms per
+     window (2 ms let the speed swing between −0.5 and +0.4 % on bursts).
+     FFmpeg's MPEG-TS muxer sends the audio in bursts later than the 120 ms
+     sync latency: without the hold the queue ran dry before bursts (1–18 ms
+     silences, several per second on the lab) and the aligner took the delay
+     of each underrun back. Three first tries failed on the lab: capping the
+     error at the window's lowest headroom made the speed swing between
+     ±0.5 % every 0.5 s; adding the shortfall to the hold counted it twice
+     when a source stall both drained the queue and moved the mapping (hold
+     104 ms); taking the window's mean error against its lowest headroom
+     kept the start-up backlog as a hold (270 ms, audio that much late).
+
+   The resampler is libswresample's own engine, always on
+   (`SWR_FLAG_RESAMPLE`, also 48 → 48 kHz, so the context is never
+   re-initialised when the compensation starts), `filter_size` 64. Checked
+   with FFmpeg 7.1's `aresample`: 48 → 48 kHz flat within 0.001 dB up to
+   21 kHz (the default 32 taps lose 0.03 dB at 20 kHz and 0.36 dB at 21 kHz);
+   a 1, 10 and 15 kHz tone resampled at a non-rational ratio leaves −95 to
+   −108 dB. libsoxr stays in the FFmpeg build but is unused. An underrun does
+   not restart the alignment: a first version did, and on the lab its
+   re-alignment step 0.5 s later only added a second silence. `audio_drift_ppm`
+   is the first track's speed, averaged over a minute (exponential); steps
+   are re-alignments and not counted. Right after a start it still holds the
+   start-up correction and settles over a few minutes.
+
+   Measured on the lab (1080p50, CPU decode, ingest on 4 CPUs) in
+   `~/mxl-lab/avs2/`: see the 1.3.1 entry of `CHANGELOG.md`. Open:
+   - egress, found with the loop bench: it reads its audio at the output
+     grain, not `read_offset_grains` back like its video, so its audio leaves
+     2 grains (40 ms at 50p) early, and the read waits up to 20 ms for
+     samples still being written. On a busy host the egress loop then falls
+     behind and skips grains (~5 % of the frames on the lab); the stream's
+     PTS count on without them (time runs slow, the audio jumps) and a timed
+     out read sends silence. That is the −40…−60 ms of the loop. Reading the
+     audio `read_offset_grains` back (lab-only build) moved the loop to
+     −31…+2 ms and the egress drops from 2–3/s to under 1/s. Also,
+     `MxlAudioReader::read` copies only the first fragment of a slice that
+     wraps the ring: up to a grain of zeros once per ring (every 2.005 s on
+     the test player's flow), the remaining silences of the loop;
+   - the ingest frame queue (8 frames) caps the video's latency at ~150 ms:
+     with `sync_latency_ms` 300 the channel stays on the slate (`no_signal`).
+     A lab-only build with 32 frames ran at 300 ms, FFmpeg source +9…+19 ms;
+   - `audio_offset_ms` is still not applied.
 
 ## MXL calls that matter
 

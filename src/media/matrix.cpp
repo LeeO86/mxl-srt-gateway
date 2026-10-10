@@ -1,5 +1,6 @@
 #include "media/matrix.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace srtgw
@@ -38,7 +39,7 @@ void applyMatrix(std::vector<TrackView> const& tracks, AudioOutput const& output
                 continue;
             }
             float const gain = static_cast<float>(dbToLinear(tap.gainDb));
-            for (int frame = 0; frame < frames; ++frame)
+            for (int frame = 0; frame < std::min(frames, track.frames); ++frame)
             {
                 interleavedOut[frame * channels + ch] += track.samples[frame * track.channels + tap.channel] * gain;
             }

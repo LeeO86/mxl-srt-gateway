@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.1
+
+### Fixes
+
+- Ingest audio was written to MXL up to about a second later than the matching video. The audio FIFO kept whatever piled up while the stream started (stream probing, slate time), often 0.6–1.1 s, and nothing brought it back to the 120 ms target: the soxr resampler ignores `swr_set_compensation`, and the hard trim only started 1 s above the target. The audio queue now keeps the source timestamps, and the writer lines it up with the video's PTS-to-TAI mapping, judged on the mean error over 25 grains:
+  - at the start it drops the older samples or inserts silence until the error is within 20 ms;
+  - after that the resampler plays the audio up to 0.5 % faster or slower (error / 2 s), so a drifting source or a decoder that falls behind is followed without a click;
+  - an error beyond 100 ms (a timestamp jump, a long stall) is stepped again;
+  - audio that arrives in bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer does that) is held as late as the queue needs to never run dry, and released by 0.5 ms per 25 grains.
+
+  Without video, the queue is held at `sync_latency_ms`. Measured on the lab host (1080p50, CPU decode, the ingest on 4 CPUs; + = audio late):
+  - FFmpeg SRT source, flash and beep with the same PTS: 1.2.1 and 1.3.0 +961…+972 ms, now +35…+48 ms (its audio arrives in bursts, see above);
+  - egress → SRT → ingest loop with the mxl-test-player A/V sync pattern, the egress's audio read fixed in a lab build (the 1.3.x egress sends its audio 40 ms early and skips grains on a busy host; open points in `IMPLEMENTATION_PLAN.md`): 1.3.0 +857…+877 ms, now −69…+34 ms;
+  - 1 kHz tone through the ingest, counted for silences and phase jumps: a steady FFmpeg source stays clean idle and with 1, 2 and 4 busy loops on each ingest CPU; on the bursty FFmpeg source, two 55 s runs of the first 1.3.1 draft (20 ms steps) had 17 silences (112 ms) and 1 click, and 46 silences (295 ms) and 7 clicks; this release 3 silences (12 ms) and none.
+- The ingest resamples with libswresample's own engine and 64-tap filters instead of soxr, which has no drift compensation. It always runs, also 48 → 48 kHz: flat within 0.001 dB up to 21 kHz; a tone resampled at a non-rational ratio leaves −95 to −108 dB.
+- A track whose queue held less than a grain was read past its end into the MXL audio (values up to 10³⁷ on the lab after an audio gap). The channel map now reads only the queued frames and fills the rest with silence.
+- `audio_drift_ppm` was the FIFO level error × 10⁶ (8,000,000 at a 1 s FIFO). It is now the first track's resampling correction (samples dropped + or inserted − per sample written, in ppm), averaged over about a minute: the source audio clock against TAI. Steps are re-alignments and not counted; right after a start it still shows the start-up correction.
+- The Compose and Kubernetes examples use the `1.3.1` image.
+
 ## 1.3.0
 
 - New web UI in the look of the other LeeO86 media functions (mxl-webrtc-monitor, mxl-test-player, mxl-replay, mxl-multiviewer, mxl-st2110-gateway, mxl-browser-source): header with the node label, channel counts, running, waiting, failed, alarm, registration and connection pills and the versions; banners for a lost API, lost live updates, a needed restart and an action's result or error; tabs in the URL hash; light and dark theme. Every API function has a control:

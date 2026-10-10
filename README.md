@@ -136,6 +136,19 @@ leaves it to x264, which takes 16 slice threads at 1080p; 4 used 22 % less
 CPU at 8 × 1080p50 on the lab host and kept p95 encode latency at ≤ 10 ms
 ([docs/hardware.md](docs/hardware.md)). NVENC ignores it.
 
+Ingest audio follows the video: each track is queued with its source
+timestamps and plays `sync_latency_ms` after the time its PTS maps to, like the
+video frames. At the start the gateway drops or inserts samples until the error
+is within 20 ms. After that the resampler plays the audio up to 0.5 % faster or
+slower, so a drifting source or a decoder that falls behind does not click. An
+error beyond 100 ms (a timestamp jump, a long stall) is stepped again. Audio
+that arrives in bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer
+does that) is held back until the queue no longer runs dry, and released
+slowly: a little late rather than with gaps. In the channel status,
+`audio_fifo_ms` is the queued audio and `audio_drift_ppm` the first track's
+resampling correction, averaged over about a minute (+: the source audio runs
+fast against TAI). The thresholds are fixed (`SPECIFICATION.md` §5.4).
+
 ## Layout
 
 `src/` is the gateway, `web/` the Vue 3 UI embedded in the binary, `tests/`

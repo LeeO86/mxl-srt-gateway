@@ -24,6 +24,8 @@ struct TrackView
 {
     int channels = 0;
     float const* samples = nullptr;
+    // Frames available at samples; the rest of the grain is silence.
+    int frames = 0;
     bool missing = false;
 };
 
