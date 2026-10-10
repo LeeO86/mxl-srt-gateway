@@ -37,6 +37,16 @@ bool ensureOutputDomain(std::string const& path, std::string const& id, std::int
 // Deletes path when its domain_def.json id matches. Refuses an empty path, "/", and a mismatched id.
 bool removeOwnDomain(std::string const& path, std::string const& id);
 
+// One part of an MXL audio slice: channel c's samples start at data + c * stride.
+struct SampleFragment
+{
+    std::uint8_t const* data = nullptr;
+    std::size_t bytes = 0;
+};
+// Interleaves `count` samples of the slice's first `planes` channels into `out` (`channels` wide).
+// A slice that wraps the ring continues at the start of the second fragment.
+void interleaveSlice(SampleFragment const& first, SampleFragment const& second, std::size_t stride, std::size_t planes, int count, float* out, int channels);
+
 class MxlDomain
 {
 public:

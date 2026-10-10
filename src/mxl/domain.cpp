@@ -584,20 +584,9 @@ bool MxlAudioReader::read(std::uint64_t endIndex, int frames, std::uint64_t time
         {
             return false;
         }
-        for (int channel = 0; channel < channels_ && channel < static_cast<int>(slices.count); ++channel)
-        {
-            auto const* base = static_cast<std::uint8_t const*>(slices.base.fragments[0].pointer);
-            if (base == nullptr)
-            {
-                continue;
-            }
-            auto const* src = reinterpret_cast<float const*>(base + static_cast<std::size_t>(channel) * slices.stride);
-            int const first = static_cast<int>(slices.base.fragments[0].size / sizeof(float));
-            for (int frame = 0; frame < count && frame < first; ++frame)
-            {
-                interleaved[static_cast<std::size_t>((done + frame) * channels_ + channel)] = src[frame];
-            }
-        }
+        interleaveSlice({static_cast<std::uint8_t const*>(slices.base.fragments[0].pointer), slices.base.fragments[0].size},
+            {static_cast<std::uint8_t const*>(slices.base.fragments[1].pointer), slices.base.fragments[1].size}, slices.stride, slices.count, count,
+            interleaved.data() + static_cast<std::size_t>(done * channels_), channels_);
         done += count;
     }
     return true;

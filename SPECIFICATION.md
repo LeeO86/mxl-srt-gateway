@@ -203,7 +203,9 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 
 - The MXL writer runs on the TAI grain clock of the target rate: for each output
   grain index, it takes the newest adapted frame whose (source-time-mapped)
-  presentation time is ≤ output time − `sync_latency_ms` (default 120 ms).
+  presentation time is ≤ output time − `sync_latency_ms` (default 120 ms,
+  0–2000). The adapted frames wait for it in a queue that holds
+  `sync_latency_ms` + 100 ms of them (at least 8).
 - Source timestamps are mapped to the local timeline with a smoothed offset; the
   synchroniser **repeats** a frame when the source is slow and **drops** one when
   it is fast. Repeat/drop events are counted (metrics) and spaced, not bursty.
@@ -229,9 +231,12 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
   Output is always at exactly the grain cadence (e.g. 960 samples per grain at
   50, 1601/1602 cadence at 59.94). `audio_drift_ppm` is the resampling
   correction of the first track (samples dropped + or inserted − per sample
-  written, in ppm), averaged over about a minute; steps are not counted.
+  written, in ppm), averaged over about a minute; steps and the first 10 s
+  after each (the error a step leaves) are not counted.
 - Lip sync: video and audio share the same mapped timeline; a per-channel
-  `audio_offset_ms` (±) corrects source offsets.
+  `audio_offset_ms` (−1000 to 1000, default 0; + plays the audio later)
+  corrects source offsets: it moves the time the ingest lines the audio up
+  with. Egress channels ignore it.
 - Loss of signal: hold the last frame for `hold_ms` (default 500), then black or
   slate (configurable, slate shows the channel label and "NO SIGNAL"); audio goes
   to silence. **The MXL flows keep running** at TAI; NMOS state does not change.
@@ -287,7 +292,9 @@ corporate firewall. Therefore:
   (default 2) before the output grain's time, or the newest one when the source
   runs later (more on mirror domains), aligned via the MXL synchronisation group
   for video and audio. An interlaced flow holds one field per grain at twice the
-  declared rate; the offset counts frames.
+  declared rate; the offset counts frames. Audio is read at the same offset:
+  the output grain's samples, `read_offset_grains` source frames earlier.
+  Each encoded audio frame is stamped with the time of its first sample.
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.

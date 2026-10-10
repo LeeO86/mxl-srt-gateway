@@ -972,6 +972,8 @@ void IngestPipeline::runIo()
         bool graphOnGpu = false;
         bool outputInterlaced = false;
         bool gpuPackFailed = false;
+        // Frames the writer's queue keeps (set with the graph).
+        std::size_t queueFrames = 8;
         double offset = 0;
         bool haveOffset = false;
         std::int64_t frameIndex = 0;
@@ -1103,6 +1105,11 @@ void IngestPipeline::runIo()
                             directPack = built && !graphCuda && frame->format == AV_PIX_FMT_YUV420P && frame->color_range != AVCOL_RANGE_JPEG &&
                                          ffmpegFilter(plan, false) == "format=yuv422p10le";
                             filteredSource = detected;
+                            // The synchroniser shows frames sync_latency_ms old: the queue keeps those
+                            // and 100 ms more (decode bursts), at least 8. The adapter gives at most a
+                            // frame per source field, or the target's frames.
+                            double const frameHz = std::max(detected.fieldHz(), config_.target.fieldHz());
+                            queueFrames = std::max<std::size_t>(8, static_cast<std::size_t>(std::ceil((config_.syncLatencyMs + 100) * frameHz / 1000.0)));
                             std::lock_guard const lock{shared_->mediaMu};
                             shared_->source = detected;
                             shared_->sourceKnown = true;
@@ -1158,7 +1165,7 @@ void IngestPipeline::runIo()
                                 shared_->ptsOffsetNs = static_cast<std::int64_t>(offset);
                                 shared_->haveOffset = true;
                                 shared_->frames.push_back(std::move(adapted));
-                                while (shared_->frames.size() > 8)
+                                while (shared_->frames.size() > queueFrames)
                                 {
                                     shared_->frames.pop_front();
                                 }
@@ -1360,8 +1367,10 @@ void IngestPipeline::runClock()
     std::uint64_t frames = 0;
     std::int64_t lastJpeg = 0;
     // Audio drift: the first track's resampling speed (samples dropped + or inserted - per sample
-    // written, ppm), averaged over about a minute. Steps are re-alignments, not drift.
+    // written, ppm), averaged over about a minute. Steps are re-alignments, not drift, and so are
+    // the first 10 s after one, which remove the error it left.
     double drift = 0;
+    std::int64_t alignedSamples = 0;
     // MXL interlaced flows: one grain per field (see the video write below).
     bool const fieldGrains = config_.target.interlaced;
     bool const topFieldFirst = config_.target.fieldOrder != "bff";
@@ -1402,6 +1411,8 @@ void IngestPipeline::runClock()
             auto const outputNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index));
             auto const grainNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index + 1)) - outputNs;
             std::int64_t const latencyNs = static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL;
+            // audio_offset_ms: + plays the audio later against the video, - earlier.
+            auto const audioOffsetNs = static_cast<std::int64_t>(config_.audioOffsetMs * 1000000.0);
             for (std::size_t q = 0; q < shared_->audio.size(); ++q)
             {
                 auto& live = shared_->audio[q];
@@ -1419,6 +1430,7 @@ void IngestPipeline::runClock()
                     headNs = mappedNs;
                     targetNs -= grainNs / 2;
                 }
+                targetNs -= audioOffsetNs;
                 std::int64_t const correction = live.aligner.add(targetNs - headNs, levelNs - grainNs);
                 if (correction > 0)
                 {
@@ -1429,9 +1441,13 @@ void IngestPipeline::runClock()
                 {
                     live.samples.insert(live.samples.begin(), static_cast<std::size_t>(-correction * live.channels), 0.f);
                 }
-                if (q == 0 && live.aligner.aligned)
+                if (q == 0)
                 {
-                    drift += (live.aligner.speed * 1000000.0 - drift) * samples / (48000.0 * 60.0);
+                    alignedSamples = live.aligner.aligned ? alignedSamples + samples : 0;
+                    if (alignedSamples > 48000 * 10)
+                    {
+                        drift += (live.aligner.speed * 1000000.0 - drift) * samples / (48000.0 * 60.0);
+                    }
                 }
             }
             audioCopy = shared_->audio;
@@ -2044,6 +2060,8 @@ void EgressPipeline::run()
         }
         auto const videoRoute = routes_(true);
         auto const audioRoute = routes_(false);
+        // Video and audio are read this many source frames before the output grain's time.
+        int const offset = config_.egress.readOffsetGrains + (videoRoute.mirror ? 4 : 0);
         std::string state = "waiting";
         std::uint8_t const* picture = slateFrame.data();
         std::size_t pictureSize = slateFrame.size();
@@ -2076,7 +2094,6 @@ void EgressPipeline::run()
             if (videoReader.isOpen())
             {
                 source = videoReader.format();
-                int const offset = config_.egress.readOffsetGrains + (videoRoute.mirror ? 4 : 0);
                 // An interlaced MXL flow holds one field per grain at twice the frame rate:
                 // frame k is grains 2k (first field) and 2k + 1. Indexes below count frames.
                 bool const fieldGrains = source.interlaced;
@@ -2318,7 +2335,11 @@ void EgressPipeline::run()
         if (audioReader.isOpen())
         {
             int const sampleCount = samplesPerGrain(static_cast<std::int64_t>(index), config_.target.rate.num, config_.target.rate.den);
-            std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), config_.target.rate.num, config_.target.rate.den));
+            // The samples of the video's time, `offset` source frames back: the newest ones are
+            // still being written.
+            Rate const rate = videoReader.format().rate;
+            std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), config_.target.rate.num, config_.target.rate.den) -
+                                                                 sampleIndexAtGrain(offset, rate.num, rate.den));
             std::vector<float> interleaved;
             if (!audioReader.read(end, sampleCount, 20000000, interleaved))
             {
@@ -2334,6 +2355,10 @@ void EgressPipeline::run()
                 auto const& track = config_.egress.audioTracks[t];
                 int const channels = static_cast<int>(track.channels.size());
                 float const gain = track.mute ? 0.f : static_cast<float>(dbToLinear(track.gainDb));
+                // The time (1/48000) of the FIFO's first sample: this grain's first one, minus what
+                // is still queued from the grains before.
+                std::int64_t pts = sampleIndexAtGrain(videoPts, config_.target.rate.num, config_.target.rate.den) -
+                                   static_cast<std::int64_t>(audioFifo[t].size() / static_cast<std::size_t>(channels));
                 for (int frame = 0; frame < sampleCount; ++frame)
                 {
                     for (int ch = 0; ch < channels; ++ch)
@@ -2372,7 +2397,8 @@ void EgressPipeline::run()
                         std::memcpy(aframe->data[0], audioFifo[t].data(), static_cast<std::size_t>(frameSize * channels) * sizeof(float));
                     }
                     audioFifo[t].erase(audioFifo[t].begin(), audioFifo[t].begin() + static_cast<std::ptrdiff_t>(frameSize * channels));
-                    aframe->pts = videoPts * sampleCount;
+                    aframe->pts = pts;
+                    pts += frameSize;
                     if (avcodec_send_frame(audioEnc[t], aframe) >= 0)
                     {
                         AVPacket* packet = av_packet_alloc();

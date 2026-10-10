@@ -93,9 +93,10 @@ both.
 7. **Web UI (1.3.0).** Split into components like the sibling UIs (shared
    `style.css` tokens, `Pill`, `Segmented`, `OriginBadge`, `IdCode`). The audio
    matrix is a tab, not a dialog. Channel, matrix, route and settings edits are
-   drafts in `web/src/store.js`. `audio_offset_ms` and `egress.profile` /
-   `egress.level` are accepted by the API but not applied by the engine, so the
-   UI has no control for them. The egress source picker uses
+   drafts in `web/src/store.js`. `egress.profile` / `egress.level` are
+   accepted by the API but not applied by the engine, so the UI has no
+   control for them (`audio_offset_ms` is applied since 1.3.2 and has one).
+   The egress source picker uses
    `GET /api/v1/domains` and `POST /channels/:id/route`; that route does not
    change the receivers' IS-05 active parameters, and the next activation
    replaces it. Without `SRTGW_CONFIG_FILE` the Settings tab only edits
@@ -141,27 +142,62 @@ both.
    not restart the alignment: a first version did, and on the lab its
    re-alignment step 0.5 s later only added a second silence. `audio_drift_ppm`
    is the first track's speed, averaged over a minute (exponential); steps
-   are re-alignments and not counted. Right after a start it still holds the
-   start-up correction and settles over a few minutes.
+   are re-alignments and not counted, nor (since 1.3.2) the first 10 s after
+   each, which remove the error the step left.
 
    Measured on the lab (1080p50, CPU decode, ingest on 4 CPUs) in
-   `~/mxl-lab/avs2/`: see the 1.3.1 entry of `CHANGELOG.md`. Open:
-   - egress, found with the loop bench: it reads its audio at the output
-     grain, not `read_offset_grains` back like its video, so its audio leaves
-     2 grains (40 ms at 50p) early, and the read waits up to 20 ms for
-     samples still being written. On a busy host the egress loop then falls
-     behind and skips grains (~5 % of the frames on the lab); the stream's
-     PTS count on without them (time runs slow, the audio jumps) and a timed
-     out read sends silence. That is the −40…−60 ms of the loop. Reading the
-     audio `read_offset_grains` back (lab-only build) moved the loop to
-     −31…+2 ms and the egress drops from 2–3/s to under 1/s. Also,
-     `MxlAudioReader::read` copies only the first fragment of a slice that
-     wraps the ring: up to a grain of zeros once per ring (every 2.005 s on
-     the test player's flow), the remaining silences of the loop;
-   - the ingest frame queue (8 frames) caps the video's latency at ~150 ms:
-     with `sync_latency_ms` 300 the channel stays on the slate (`no_signal`).
-     A lab-only build with 32 frames ran at 300 ms, FFmpeg source +9…+19 ms;
-   - `audio_offset_ms` is still not applied.
+   `~/mxl-lab/avs2/`: see the 1.3.1 entry of `CHANGELOG.md`. The open points
+   found there are item 9.
+9. **Egress audio and lip-sync settings (1.3.2).** Found with the 1.3.1 loop
+   bench (test player → egress → SRT → ingest):
+   - Egress reads its audio `read_offset_grains` source frames back, like its
+     video (in samples: `sampleIndexAtGrain(offset, source rate)`, mirror
+     domains included). It read the output grain, 40 ms ahead of the video,
+     and waited up to 20 ms per grain for samples still being written; on a
+     busy host the loop fell behind and skipped grains. Each encoded audio
+     frame now carries the time of its first sample (this grain's first
+     sample minus what the FIFO still holds), not the grain's start. That
+     was up to 20 ms late and overlapped the next frame (AAC frames are 1024
+     samples, grains 960).
+   - `MxlAudioReader::read` copies both fragments of a slice that wraps the
+     ring (`interleaveSlice` in `src/mxl/domain_files.cpp`, MXL-free so the
+     unit tests cover it).
+   - `audio_offset_ms` is applied where §5.4 puts it: on ingest, to correct
+     a source's lip sync. It moves the aligner's target (+: audio later).
+     Egress ignores it. The range ±1000 ms keeps the inserted silence
+     bounded.
+   - The ingest frame queue holds `sync_latency_ms` + 100 ms of frames, at
+     least 8 (the old size), counted at the higher of the source's field
+     rate and the target's frame rate. That rate is at least the adapter's
+     output rate, whatever the deinterlacer. `sync_latency_ms` is checked to
+     0–2000 (the UI's range), which bounds the queue. A time-based queue was
+     not used: it would need a second, count-based bound for streams whose
+     timestamps do not move.
+   - `audio_drift_ppm` skips the first 10 s after each alignment. After a
+     step, the residual (≤ 20 ms) is gone at 0.5 % and then by error / 2 s.
+     At 10 s that is about 0.2 ms, about 3 ppm of the minute's average.
+
+   Measured on the lab in `~/mxl-lab/avs3/` (see `CHANGELOG.md` 1.3.2; the
+   egress on 4 CPUs with NVENC, the ingest on 4 others, load = 2 busy loops
+   per egress CPU). The egress's own A/V timing is measured on its MPEG-TS
+   (`avs3-ts`, `avs3-ts3`: flash and beep PTS against the test player's
+   flows), because the loop adds the ingest's ±10 ms per-run phase (the
+   shown frame lies anywhere within a grain of the audio's target).
+   FFmpeg's own AAC → MPEG-TS → decode chain adds +21 ms (MP2 +10, AC-3
+   +5: each codec's priming), measured with an ideal FFmpeg source
+   (`avs3-offline`). The figures in the changelog leave it out. Open:
+   - one of 8 egress instances measured −20 ms (video one grain behind its
+     audio) for the whole run, without drops or repeats; not explained;
+   - with load on the egress CPUs, the loop's A/V offset swings −150…+54 ms
+     (idle +18…−2, one −65). The egress stays exact (0 drops, its TS on
+     time), but its packets leave in bursts of up to 4 grains. The ingest's
+     video follows the PTS mapping at once (repeat/drop), and its audio
+     follows at ≤ 0.5 %;
+   - the FFmpeg chain's priming offset (+21 ms for AAC) is not compensated
+     on either side;
+   - an egress `s302m` track has no audio stream in the TS: FFmpeg's
+     `s302m` encoder is experimental and does not open, and its samples are
+     `s32`, not the float the FIFO copies. Not changed here.
 
 ## MXL calls that matter
 
@@ -201,7 +237,8 @@ NMOS transport in v1.
 ## Tests
 
 `./build/unit-tests` covers the decision table, synchroniser, cadence, matrix,
-config precedence, access control, v210 stride and metrics text.
+config precedence, access control, v210 stride, audio slices that wrap the
+ring and metrics text.
 
 `tests/integration/ci.sh` pushes FFmpeg SRT into an ingest listener, checks
 format and frame count, pulls the egress listener and checks H.264 720p, checks

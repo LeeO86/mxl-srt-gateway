@@ -3,6 +3,7 @@
 #include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -142,5 +143,28 @@ std::string domainsJson(std::vector<DomainRecord> const& domains, std::string co
     picojson::object root;
     root["domains"] = picojson::value(list);
     return picojson::value(root).serialize();
+}
+
+void interleaveSlice(SampleFragment const& first, SampleFragment const& second, std::size_t stride, std::size_t planes, int count, float* out, int channels)
+{
+    int const head = std::min(count, static_cast<int>(first.bytes / sizeof(float)));
+    int const end = std::min(count, head + static_cast<int>(second.bytes / sizeof(float)));
+    for (int channel = 0; channel < channels && channel < static_cast<int>(planes) && first.data != nullptr; ++channel)
+    {
+        auto const* src = reinterpret_cast<float const*>(first.data + static_cast<std::size_t>(channel) * stride);
+        for (int frame = 0; frame < head; ++frame)
+        {
+            out[frame * channels + channel] = src[frame];
+        }
+        if (second.data == nullptr)
+        {
+            continue;
+        }
+        auto const* wrapped = reinterpret_cast<float const*>(second.data + static_cast<std::size_t>(channel) * stride);
+        for (int frame = head; frame < end; ++frame)
+        {
+            out[frame * channels + channel] = wrapped[frame - head];
+        }
+    }
 }
 } // namespace srtgw
