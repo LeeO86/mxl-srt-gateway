@@ -513,39 +513,129 @@ TEST_CASE("frame synchroniser resyncs when the next frames have left the buffer"
     CHECK(next.dropped == 0);
 }
 
-TEST_CASE("audio aligner lines the audio up with the video")
+TEST_CASE("audio aligner steps until the start-up error is within the tolerance")
 {
     std::int64_t const ms = 1000000;
+    // A queue with plenty of audio beyond each grain.
+    std::int64_t const queued = 2000 * ms;
     // 1.3.0 on the lab: the queue kept ~1 s of start-up audio, its first sample ~960 ms older
     // than the sync latency asks for. After one window all of it is dropped at once.
     AudioAligner late;
     for (int grain = 0; grain < 24; ++grain)
     {
-        CHECK(late.add(960 * ms) == 0);
+        CHECK(late.add(960 * ms, queued) == 0);
     }
-    CHECK(late.add(960 * ms) == 960 * 48);
+    CHECK(late.add(960 * ms, queued) == 960 * 48);
+    CHECK(late.speed == 0.0);
+    // A backlog is late audio, not a short queue: nothing is held.
+    CHECK(late.holdNs == 0);
+    // The video mapping still settles: what is left beyond 20 ms is stepped too.
+    std::int64_t dropped = 0;
+    for (int grain = 0; grain < 25; ++grain)
+    {
+        dropped += late.add(64 * ms, queued);
+    }
+    CHECK(dropped == 64 * 48);
+    CHECK_FALSE(late.aligned);
+    // Within 20 ms: aligned, the rest is left to the resampler.
+    for (int grain = 0; grain < 25; ++grain)
+    {
+        CHECK(late.add(15 * ms, queued) == 0);
+    }
+    CHECK(late.aligned);
     // Audio due later than the output: silence is inserted in front of it.
     AudioAligner early;
     std::int64_t inserted = 0;
     for (int grain = 0; grain < 25; ++grain)
     {
-        inserted += early.add(-70 * ms);
+        inserted += early.add(-70 * ms, queued);
     }
     CHECK(inserted == -70 * 48);
-    // Decoder bursts: +-60 ms of jitter around a 10 ms error averages out, nothing moves.
-    AudioAligner jitter;
-    for (int grain = 0; grain < 250; ++grain)
+}
+
+TEST_CASE("audio aligner corrects small errors by speed, large ones by a step")
+{
+    std::int64_t const ms = 1000000;
+    std::int64_t const queued = 2000 * ms;
+    AudioAligner aligner;
+    auto window = [&](std::int64_t errorNs) {
+        std::int64_t moved = 0;
+        for (int grain = 0; grain < aligner.window; ++grain)
+        {
+            moved += aligner.add(errorNs, queued);
+        }
+        return moved;
+    };
+    CHECK(window(0) == 0);
+    REQUIRE(aligner.aligned);
+    // 4 ms late: 0.2 % faster (gone in about 2 s), no step.
+    CHECK(window(4 * ms) == 0);
+    CHECK(aligner.speed == doctest::Approx(0.002));
+    // 3 ms early: slower.
+    CHECK(window(-3 * ms) == 0);
+    CHECK(aligner.speed == doctest::Approx(-0.0015));
+    // A decoder that falls behind: +-60 ms of jitter around 4 ms averages out to the same speed.
+    for (int grain = 0; grain < aligner.window; ++grain)
     {
-        CHECK(jitter.add((grain % 2 == 0 ? 70 : -50) * ms) == 0);
+        std::int64_t const jitter = grain == aligner.window - 1 ? 0 : (grain % 2 == 0 ? 60 : -60);
+        CHECK(aligner.add((4 + jitter) * ms, queued) == 0);
     }
-    // A mean just beyond the tolerance is corrected.
-    AudioAligner edge;
-    std::int64_t dropped = 0;
-    for (int grain = 0; grain < 25; ++grain)
+    CHECK(aligner.speed == doctest::Approx(0.002));
+    // Up to the step threshold the speed is clamped to 0.5 %, nothing is stepped.
+    CHECK(window(60 * ms) == 0);
+    CHECK(aligner.speed == doctest::Approx(0.005));
+    CHECK(window(-100 * ms) == 0);
+    CHECK(aligner.speed == doctest::Approx(-0.005));
+    // Beyond it (a jump in the source timestamps): a step, the speed back to nominal, and the
+    // alignment starts over.
+    CHECK(window(150 * ms) == 150 * 48);
+    CHECK(aligner.speed == 0.0);
+    CHECK_FALSE(aligner.aligned);
+    CHECK(window(-30 * ms) == -30 * 48);
+    CHECK(window(5 * ms) == 0);
+    CHECK(aligner.aligned);
+}
+
+TEST_CASE("audio aligner keeps the queue from running dry")
+{
+    std::int64_t const ms = 1000000;
+    AudioAligner bursts;
+    auto window = [&](std::int64_t errorNs, std::int64_t lowNs) {
+        std::int64_t moved = 0;
+        for (int grain = 0; grain < bursts.window; ++grain)
+        {
+            moved += bursts.add(errorNs, grain % 6 == 5 ? lowNs : 100 * ms);
+        }
+        return moved;
+    };
+    // FFmpeg's TS muxer sends the audio in bursts: on time by the mapping, but the queue runs
+    // 30 ms dry before a burst. The audio is held 40 ms later (30 + the 10 ms margin).
+    CHECK(window(0, -30 * ms) == -40 * 48);
+    CHECK(bursts.holdNs == 40 * ms);
+    // Now 40 ms late by the mapping, the queue 10 ms above a grain at its lowest: aligned.
+    CHECK(window(40 * ms, 10 * ms) == 0);
+    CHECK(bursts.aligned);
+    CHECK(bursts.speed == 0.0);
+    // Spare headroom releases the hold slowly: 0.5 ms per window, a tiny speed-up.
+    CHECK(window(40 * ms, 30 * ms) == 0);
+    CHECK(bursts.holdNs == 39500000);
+    CHECK(bursts.speed == doctest::Approx(0.00025));
+    // A later burst (5 ms short of a grain, 38 ms late) holds 53 ms at once: slower, no step.
+    CHECK(window(38 * ms, -5 * ms) == 0);
+    CHECK(bursts.holdNs == 53 * ms);
+    CHECK(bursts.speed == doctest::Approx(-0.005));
+    // Audio early by the mapping and a short queue ask for the same delay: it is not added twice.
+    AudioAligner early;
+    for (int grain = 0; grain < early.window; ++grain)
     {
-        dropped += edge.add(21 * ms);
+        CHECK(early.add(0, 100 * ms) == 0);
     }
-    CHECK(dropped == 21 * 48);
+    for (int grain = 0; grain < early.window; ++grain)
+    {
+        CHECK(early.add(-60 * ms, grain % 6 == 5 ? 0 : 100 * ms) == 0);
+    }
+    CHECK(early.holdNs == 0);
+    CHECK(early.speed == doctest::Approx(-0.005));
 }
 
 TEST_CASE("channel map applies gain and silence")

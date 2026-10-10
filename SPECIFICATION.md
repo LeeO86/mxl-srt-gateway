@@ -32,7 +32,7 @@ Design principles:
    crosspoint like every other media function.
 2. **The MXL timeline is TAI.** SRT sources are not locked to the facility clock.
    Ingest therefore always runs a frame synchroniser: video repeats/drops frames,
-   audio follows the video timeline by dropping or inserting samples. The MXL
+   audio follows the video timeline, resampled with drift compensation. The MXL
    output never stalls and never runs ahead of TAI.
 3. **Compressed edge, own timing core.** Demux, decode, encode and mux use the
    FFmpeg libraries (libavformat, libavcodec, libavfilter, libswresample), SRT uses
@@ -54,7 +54,8 @@ SCTE-35, subtitles/teletext, HDR, ST 2110, RTMP/RIST/WebRTC, recording.
  INGEST channel
  libsrt (caller/listener) ─► TS demux (libavformat, custom AVIO)
    ─► video decode (NVDEC | CPU) ─► format adapter (CUDA | CPU filters)
-   ─► audio decode ─► resampler ─► audio queue (aligned to video PTS) ─► channel map
+   ─► audio decode ─► resampler (drift compensation) ─► audio queue (aligned to
+      video PTS) ─► channel map
    ─► frame synchroniser (TAI clock) ─► MXL writers (v210, float32)
 
  EGRESS channel
@@ -82,7 +83,8 @@ SCTE-35, subtitles/teletext, HDR, ST 2110, RTMP/RIST/WebRTC, recording.
 - FFmpeg 7.x libraries (exact version pinned), built in the image with: libsrt not
   required (we use libsrt directly), nvcodec headers (NVDEC/NVENC via
   `ffnvcodec`), CUDA filters if available (`scale_cuda`, `bwdif_cuda` or
-  `yadif_cuda`), libx264, libx265 (optional), libsoxr for resampling. Record the
+  `yadif_cuda`), libx264, libx265 (optional), libsoxr (unused since 1.3.1: the
+  ingest resamples with libswresample's own engine, see 5.4). Record the
   configure line in `IMPLEMENTATION_PLAN.md`. Licensing: an image containing
   libx264/libx265 is GPL; document that in the README and `THIRD_PARTY_NOTICES.md`.
 - CUDA runtime linked statically, as in mxl-multiviewer; the image MUST start on a
@@ -205,16 +207,29 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 - Source timestamps are mapped to the local timeline with a smoothed offset; the
   synchroniser **repeats** a frame when the source is slow and **drops** one when
   it is fast. Repeat/drop events are counted (metrics) and spaced, not bursty.
-- Audio is resampled to 48 kHz float32 (libswresample with soxr) and queued with
-  its source timestamps. Before each grain, the writer lines the queue up with
-  the video: the first queued sample plays at its mapped presentation time +
-  `sync_latency_ms` (half a grain later, like the frame the synchroniser shows).
-  When the mean error over 25 grains is more than 20 ms, it drops the older
-  samples or inserts silence; without a video mapping it holds the queue at
-  `sync_latency_ms`. Output is always at
-  exactly the grain cadence (e.g. 960 samples per grain at 50, 1601/1602
-  cadence at 59.94). `audio_drift_ppm` is the net of dropped (+) and inserted
-  (−) samples per sample written after the first alignment.
+- Audio is resampled to 48 kHz float32 (libswresample's own engine, 64-tap
+  filters, always on, also 48 → 48 kHz; soxr has no drift compensation) and
+  queued with its source timestamps. Before each grain, the writer lines the
+  queue up with the video: the first queued sample plays at its mapped
+  presentation time + `sync_latency_ms` (half a grain later, like the frame the
+  synchroniser shows); without a video mapping it holds the queue at
+  `sync_latency_ms`. It acts on the mean error over 25 grains:
+  - at the start, it drops the older samples or inserts silence until the mean
+    error is within 20 ms;
+  - after that, the resampler plays the audio faster or slower by error / 2 s,
+    at most 0.5 % (`swr_set_compensation`), so drift and the jitter of a decoder
+    that falls behind are corrected without a click;
+  - a mean error beyond 100 ms (a jump in the source timestamps, a long stall)
+    is stepped again, and the alignment starts over;
+  - the audio is held as late as the worst of those grains needed to keep
+    10 ms of audio beyond it, at once; when less would do, the hold shrinks by
+    at most 0.5 ms per 25 grains. A source that sends its audio in bursts later
+    than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little late
+    rather than with gaps.
+  Output is always at exactly the grain cadence (e.g. 960 samples per grain at
+  50, 1601/1602 cadence at 59.94). `audio_drift_ppm` is the resampling
+  correction of the first track (samples dropped + or inserted − per sample
+  written, in ppm), averaged over about a minute; steps are not counted.
 - Lip sync: video and audio share the same mapped timeline; a per-channel
   `audio_offset_ms` (±) corrects source offsets.
 - Loss of signal: hold the last frame for `hold_ms` (default 500), then black or

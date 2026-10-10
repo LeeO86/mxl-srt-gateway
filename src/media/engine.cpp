@@ -1246,13 +1246,15 @@ void IngestPipeline::runIo()
                             }
                             else
                             {
-                                av_opt_set(dec.swr, "resampler", "soxr", 0);
+                                // The default engine (soxr has no swr_set_compensation), always
+                                // resampling, also 48 to 48 kHz, so the aligner's speed applies
+                                // without re-initialising the context. 64 taps keep 48 kHz flat
+                                // to 21 kHz (32: -0.36 dB there).
+                                av_opt_set_int(dec.swr, "flags", SWR_FLAG_RESAMPLE, 0);
+                                av_opt_set_int(dec.swr, "filter_size", 64, 0);
                                 if (swr_init(dec.swr) < 0)
                                 {
                                     swr_free(&dec.swr);
-                                    swr_alloc_set_opts2(&dec.swr, &outLayout, AV_SAMPLE_FMT_FLT, 48000, &inLayout, static_cast<AVSampleFormat>(frame->format),
-                                        frame->sample_rate, 0, nullptr);
-                                    swr_init(dec.swr);
                                 }
                             }
                             av_channel_layout_uninit(&outLayout);
@@ -1268,6 +1270,7 @@ void IngestPipeline::runIo()
                                 inPlanes[plane] = frame->extended_data[plane];
                             }
                             int const got = swr_convert(dec.swr, outPlanes, outCount, inPlanes, frame->nb_samples);
+                            double speed = 0;
                             if (got > 0)
                             {
                                 std::lock_guard const lock{shared_->mediaMu};
@@ -1290,7 +1293,12 @@ void IngestPipeline::runIo()
                                 {
                                     queue.endPtsNs += duration;
                                 }
+                                speed = queue.aligner.speed;
                             }
+                            // From the next frame on, the aligner's speed: over 2^20 output samples
+                            // (re-armed with every frame) that many fewer (faster) or more.
+                            int const distance = 1 << 20;
+                            swr_set_compensation(dec.swr, static_cast<int>(std::lround(-speed * distance)), distance);
                         }
                         av_frame_unref(frame);
                     }
@@ -1351,11 +1359,9 @@ void IngestPipeline::runClock()
     std::uint64_t drops = 0;
     std::uint64_t frames = 0;
     std::int64_t lastJpeg = 0;
-    // Audio drift: samples dropped (+) or inserted (-) on the first track after its first
-    // alignment, per sample written since then.
-    bool audioAligned = false;
-    std::int64_t driftCorrected = 0;
-    std::int64_t driftWritten = 0;
+    // Audio drift: the first track's resampling speed (samples dropped + or inserted - per sample
+    // written, ppm), averaged over about a minute. Steps are re-alignments, not drift.
+    double drift = 0;
     // MXL interlaced flows: one grain per field (see the video write below).
     bool const fieldGrains = config_.target.interlaced;
     bool const topFieldFirst = config_.target.fieldOrder != "bff";
@@ -1376,6 +1382,7 @@ void IngestPipeline::runClock()
         bool haveChosen = false;
         std::string sourceFormat;
         std::string decoder;
+        int const samples = samplesPerGrain(static_cast<std::int64_t>(index), config_.target.rate.num, config_.target.rate.den);
         std::vector<Shared::AudioQ> audioCopy;
         bool failover = false;
         SrtStats srtStats;
@@ -1412,7 +1419,7 @@ void IngestPipeline::runClock()
                     headNs = mappedNs;
                     targetNs -= grainNs / 2;
                 }
-                std::int64_t const correction = live.aligner.add(targetNs - headNs);
+                std::int64_t const correction = live.aligner.add(targetNs - headNs, levelNs - grainNs);
                 if (correction > 0)
                 {
                     auto const drop = static_cast<std::ptrdiff_t>(std::min(correction, queued) * live.channels);
@@ -1422,14 +1429,9 @@ void IngestPipeline::runClock()
                 {
                     live.samples.insert(live.samples.begin(), static_cast<std::size_t>(-correction * live.channels), 0.f);
                 }
-                if (q == 0)
+                if (q == 0 && live.aligner.aligned)
                 {
-                    // Steps after the first alignment follow the source audio clock: the drift.
-                    if (audioAligned)
-                    {
-                        driftCorrected += correction;
-                    }
-                    audioAligned = audioAligned || (correction == 0 && live.aligner.count == 0);
+                    drift += (live.aligner.speed * 1000000.0 - drift) * samples / (48000.0 * 60.0);
                 }
             }
             audioCopy = shared_->audio;
@@ -1514,7 +1516,6 @@ void IngestPipeline::runClock()
                 video->write(grain, picture, pictureSize, false);
             }
         }
-        int const samples = samplesPerGrain(static_cast<std::int64_t>(index), config_.target.rate.num, config_.target.rate.den);
         std::vector<double> meters;
         std::vector<std::string> alarms;
         if (!config_.audioOutputs.empty())
@@ -1523,11 +1524,6 @@ void IngestPipeline::runClock()
         }
         std::vector<TrackView> views;
         double fifoMs = 0;
-        if (audioAligned)
-        {
-            driftWritten += samples;
-        }
-        double const drift = driftWritten > 0 ? static_cast<double>(driftCorrected) * 1000000.0 / static_cast<double>(driftWritten) : 0.0;
         for (auto& queue : audioCopy)
         {
             bool const stale = queue.lastMs != 0 && monoNowMs() - queue.lastMs > 1000 && queue.samples.empty();
