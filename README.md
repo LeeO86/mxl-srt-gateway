@@ -68,7 +68,8 @@ the secret; they are never logged and are omitted from the API unless
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `WEB_PORT` | `8120` | UI, REST, `/livez`, `/readyz`, `/metrics` |
+| `WEB_PORT` | `8120` | UI, REST, `/livez`, `/readyz`, `/metrics`, widgets |
+| `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the `/widget` pages; `/widgets` answers these origins with CORS. `;`, `,` or control characters exit 78 |
 | `NMOS_PORT` | `3272` | IS-04/IS-05 node API. WebSocket is `NMOS_PORT`+1 |
 | `SRT_PORT_RANGE` | `9000-9099` | listener ports this process may bind |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | parent of every domain directory, mirrors included |
@@ -100,7 +101,8 @@ REST, all under `/api/v1`: `GET /status`, `GET /info`, `GET /nmos`,
 `?secrets=1`), `POST /config/import`, `GET|POST /channels`,
 `GET|PUT|DELETE /channels/:id`, `PUT /channels/:id/matrix`,
 `POST /channels/:id/route`, `GET /channels/:id/status`, `GET /channels/:id/thumbnail`,
-WebSocket `/api/v1/events`. `GET /info` has the versions, the node label, the
+WebSocket `/api/v1/events`. Outside it: `GET /widgets` and `GET /widget/channel-status`
+(below). `GET /info` has the versions, the node label, the
 announced address and the config file. `GET /domains` lists the MXL domains
 under `MXL_DOMAIN_SCAN_PATH` with their flows. `egress.preset` is the x264
 preset; `egress.audio_preset` picks the audio tracks (`8x-stereo-aac`,
@@ -112,6 +114,17 @@ delete, the egress MXL source), Audio (ingest matrix, egress tracks), NMOS &
 MXL, Status and Settings (origins, export, import). Edits stay drafts until
 they are applied, across tab switches and reconnects. Passphrases are
 write-only.
+
+Widgets: operator screens can frame one channel. `GET /widgets` lists the widgets as
+`[{id, title, params, min_size, version}]` (`params` is a JSON schema of the
+query). `GET /widget/channel-status?channel=<id>[&theme=dark|light|transparent]`
+(`min_size` 360×200) shows the channel's state, whether it is listening,
+calling or connected and to which peer, rate, RTT, lost and retransmitted
+packets, latency, SRT buffer, dropped packets, the MXL audio meters (ingest),
+errors and alarms, and a Start/Stop button (the channel's `enabled`; Stop asks
+once more). The page uses the gateway's own API and posts `widget-ready` and
+`widget-size` to its parent. Only the pages that `WIDGET_FRAME_ANCESTORS` names
+may frame it; on the platform set it to `'self' https://designer.<fqdn>`.
 
 On the platform, set `NMOS_HOST_ADDRESS` to the pod IP (or the node IP on a
 host network), `NMOS_SEED` to `<production>-srtgw`, `NMOS_LABEL` and

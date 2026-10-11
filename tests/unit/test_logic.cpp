@@ -9,6 +9,7 @@
 #include "media/v210.hpp"
 #include "nmos/ids.hpp"
 #include "ops/metrics.hpp"
+#include "ops/widgets.hpp"
 #include "srt/access.hpp"
 #include "util/jsonutil.hpp"
 #include "util/uuid.hpp"
@@ -228,6 +229,88 @@ TEST_CASE("saved settings keep the environment and flag a restart only for an ac
     store.replaceGlobals({{"DECODER", "cpu"}});
     CHECK(store.snapshot().restartRequired);
     CHECK(store.snapshot().config.decoder == "cpu");
+}
+
+TEST_CASE("WIDGET_FRAME_ANCESTORS defaults to 'self', is kept on save and must be one source list")
+{
+    CHECK(loadFromSources({}, "[]", {}).config.widgetFrameAncestors == "'self'");
+    auto const set = loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "'self' https://designer.example"}});
+    CHECK(set.config.widgetFrameAncestors == "'self' https://designer.example");
+    CHECK(configToJson(set, false).find(R"("WIDGET_FRAME_ANCESTORS":"'self' https://designer.example")") != std::string::npos);
+    CHECK(configToEnv(set.config).find("WIDGET_FRAME_ANCESTORS='self' https://designer.example\n") != std::string::npos);
+    CHECK_THROWS_AS(loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "'self'; script-src *"}}), ConfigError);
+    CHECK_THROWS_AS(loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "https://a.example, https://b.example"}}), ConfigError);
+
+    ConfigStore store(loadFromSources({{"WIDGET_FRAME_ANCESTORS", "https://designer.example"}}, "[]", {}));
+    store.replaceGlobals({{"LOG_LEVEL", "debug"}});
+    CHECK(store.config().widgetFrameAncestors == "https://designer.example");
+    store.replaceGlobals({{"WIDGET_FRAME_ANCESTORS", "'none'"}});
+    CHECK(store.config().widgetFrameAncestors == "'none'");
+}
+
+TEST_CASE("widgets: the list with CORS for listed origins, the page with CSP frame-ancestors")
+{
+    Config config;
+    config.widgetFrameAncestors = "'self' https://designer.example";
+    config.channels = {defaultIngest("in1", 9000), defaultEgress("out 2")};
+    auto const get = [&](std::string const& path, std::string const& query = "", std::string const& origin = "", std::string const& method = "GET") {
+        return widgetResponse(config, HttpRequest{method, path, query, "", {}}, origin, "<!doctype html><title>ui</title>");
+    };
+    auto const header = [](HttpResponse const& response, std::string const& name) {
+        for (auto const& item : response.headers)
+        {
+            if (item.first == name)
+            {
+                return item.second;
+            }
+        }
+        return std::string("(none)");
+    };
+
+    auto const list = get("/widgets", "", "https://designer.example");
+    CHECK(list.status == 200);
+    CHECK(header(list, "Access-Control-Allow-Origin") == "https://designer.example");
+    CHECK(header(list, "Vary") == "Origin");
+    std::string error;
+    auto const body = json::parse(list.body, &error);
+    REQUIRE(error.empty());
+    REQUIRE(body.is<picojson::array>());
+    REQUIRE(body.get<picojson::array>().size() == 1);
+    auto const& widget = body.get<picojson::array>()[0];
+    CHECK(json::fieldString(widget, "id") == "channel-status");
+    CHECK(json::fieldString(widget, "version") == kVersion);
+    CHECK(json::field(widget, "min_size")->serialize() == R"({"h":200,"w":360})");
+    CHECK(json::field(widget, "params")->serialize() ==
+          R"({"properties":{"channel":{"description":"Channel id (ingest or egress)","enum":["in1","out 2"],"title":"Channel","type":"string"}},)"
+          R"("required":["channel"],"type":"object"})");
+    auto const other = get("/widgets", "", "https://evil.example");
+    CHECK(other.status == 200);
+    CHECK(header(other, "Access-Control-Allow-Origin") == "(none)");
+    CHECK(header(other, "Vary") == "Origin");
+    CHECK(header(get("/widgets"), "Access-Control-Allow-Origin") == "(none)");
+    auto const post = get("/widgets", "", "", "POST");
+    CHECK(post.status == 405);
+    CHECK(header(post, "Allow") == "GET");
+    CHECK(get("/widgets", "", "", "OPTIONS").status == 405);
+    CHECK(get("/widget/channel-status", "channel=in1", "", "PUT").status == 405);
+
+    auto const page = get("/widget/channel-status", "channel=in1&theme=transparent");
+    CHECK(page.status == 200);
+    CHECK(page.contentType.rfind("text/html", 0) == 0);
+    CHECK(page.body == "<!doctype html><title>ui</title>");
+    CHECK(header(page, "Content-Security-Policy") == "frame-ancestors 'self' https://designer.example");
+    CHECK(header(page, "X-Frame-Options") == "(none)");
+    CHECK(header(page, "Access-Control-Allow-Origin") == "(none)");
+    CHECK(get("/widget/channel-status", "theme=light&channel=out%202").status == 200);
+    CHECK(get("/widget/channel-status", "channel=out+2").status == 200);
+    CHECK(get("/widget/channel-status").status == 400);
+    CHECK(get("/widget/channel-status", "channel=").status == 400);
+    CHECK(get("/widget/channel-status", "channel=in9").status == 400);
+    CHECK(get("/widget/channel-status", "channel=in1&theme=pink").status == 400);
+    CHECK(get("/widget/tally", "channel=in1").status == 404);
+    CHECK(isWidgetPath("/widgets"));
+    CHECK(isWidgetPath("/widget/channel-status"));
+    CHECK_FALSE(isWidgetPath("/api/v1/status"));
 }
 
 TEST_CASE("info names the versions, the node label and the config file")

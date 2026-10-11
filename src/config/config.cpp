@@ -317,7 +317,7 @@ std::vector<std::string> globalKeys()
     return {"HOST_ID", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR", "MXL_OUTPUT_DOMAIN_ID", "DECODER", "ENCODER", "SRT_PORT_RANGE",
         "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_QUERY_ADDRESS", "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED",
         "NMOS_LABEL", "NMOS_TAGS", "WEB_PORT", "LOG_LEVEL", "NMOS_HOST_ADDRESS", "SRTGW_PUBLIC_IP", "MXL_HISTORY_DURATION_MS",
-        "SRTGW_HISTORY_DURATION_NS", "STATE_DIR", "SHUTDOWN_TIMEOUT_S", "MXL_CLEANUP_ON_EXIT"};
+        "SRTGW_HISTORY_DURATION_NS", "STATE_DIR", "SHUTDOWN_TIMEOUT_S", "MXL_CLEANUP_ON_EXIT", "WIDGET_FRAME_ANCESTORS"};
 }
 
 bool isRestartKey(std::string const& key)
@@ -375,6 +375,15 @@ void validateConfig(Config const& config)
     if (!config.mxlOutputDomainId.empty() && !isUuid(config.mxlOutputDomainId))
     {
         error += "MXL_OUTPUT_DOMAIN_ID is not a UUID; ";
+    }
+    // One CSP directive's source list: a ';' or ',' would start another directive or policy.
+    for (unsigned char const c : config.widgetFrameAncestors)
+    {
+        if (c < 0x20 || c == 0x7f || c == ';' || c == ',')
+        {
+            error += "WIDGET_FRAME_ANCESTORS must be a CSP source list, e.g. 'self' https://designer.example; ";
+            break;
+        }
     }
     if (!oneOf(config.logLevel, {"error", "warn", "warning", "info", "debug", "trace"}))
     {
@@ -610,6 +619,11 @@ LoadedConfig loadFromSources(std::map<std::string, std::string> const& fileValue
         }
     }
     loaded.config.webPort = envInt({{"WEB_PORT", take("WEB_PORT", "8120")}}, "WEB_PORT", 8120, &error);
+    loaded.config.widgetFrameAncestors = take("WIDGET_FRAME_ANCESTORS", "'self'");
+    if (loaded.config.widgetFrameAncestors.find_first_not_of(' ') == std::string::npos)
+    {
+        loaded.config.widgetFrameAncestors = "'self'";
+    }
     loaded.config.logLevel = lower(take("LOG_LEVEL", "info"));
     loaded.config.stateDir = take("STATE_DIR", "/config");
     loaded.config.shutdownTimeoutS = envInt({{"SHUTDOWN_TIMEOUT_S", take("SHUTDOWN_TIMEOUT_S", "10")}}, "SHUTDOWN_TIMEOUT_S", 10, &error);
@@ -1015,6 +1029,7 @@ std::string configToJson(LoadedConfig const& loaded, bool includeSecrets)
     add("NMOS_LABEL", cfg.nmosLabel);
     add("NMOS_TAGS", cfg.nmosTagsJson);
     obj["WEB_PORT"] = picojson::value(static_cast<double>(cfg.webPort));
+    add("WIDGET_FRAME_ANCESTORS", cfg.widgetFrameAncestors);
     add("LOG_LEVEL", cfg.logLevel);
     add("NMOS_HOST_ADDRESS", cfg.hostAddress);
     add("SRTGW_PUBLIC_IP", cfg.hostAddress);
@@ -1068,6 +1083,7 @@ std::string configToEnv(Config const& config)
     out << "NMOS_SEED=" << config.nmosSeed << "\n";
     out << "NMOS_LABEL=" << config.nmosLabel << "\n";
     out << "WEB_PORT=" << config.webPort << "\n";
+    out << "WIDGET_FRAME_ANCESTORS=" << config.widgetFrameAncestors << "\n";
     out << "LOG_LEVEL=" << config.logLevel << "\n";
     out << "NMOS_HOST_ADDRESS=" << config.hostAddress << "\n";
     out << "SRTGW_PUBLIC_IP=" << config.hostAddress << "\n";

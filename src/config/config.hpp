@@ -124,6 +124,8 @@ struct Config
     std::string nmosLabel;
     std::string nmosTagsJson;
     int webPort = 8120;
+    // CSP frame-ancestors of the widget pages; /widgets answers CORS for these origins.
+    std::string widgetFrameAncestors = "'self'";
     std::string logLevel = "info";
     // Address announced to NMOS, the UI and remote SRT callers.
     // NMOS_HOST_ADDRESS, or SRTGW_PUBLIC_IP when that is unset.
