@@ -807,6 +807,27 @@ TEST_CASE("channel map applies gain and silence")
     CHECK(defaultAudioBitrate("aac", "5.1") == 384000);
 }
 
+TEST_CASE("egress audio is packed in the encoder's sample format")
+{
+    // Two frames of stereo: full scale and beyond, then half scale and silence.
+    std::vector<float> const in = {1.5f, -1.5f, 0.5f, 0.f};
+    std::vector<float> left(2), right(2);
+    std::uint8_t* planar[2] = {reinterpret_cast<std::uint8_t*>(left.data()), reinterpret_cast<std::uint8_t*>(right.data())};
+    packSamples(in.data(), 2, 2, SampleLayout{true, 4, true}, planar);
+    CHECK(left == std::vector<float>{1.5f, 0.5f});
+    CHECK(right == std::vector<float>{-1.5f, 0.f});
+    // SMPTE 302M: interleaved 32-bit integers, clipped at full scale.
+    std::vector<std::int32_t> s32(4);
+    std::uint8_t* packed[1] = {reinterpret_cast<std::uint8_t*>(s32.data())};
+    packSamples(in.data(), 2, 2, SampleLayout{false, 4, false}, packed);
+    CHECK(s32 == std::vector<std::int32_t>{2147483647, -2147483647 - 1, 1073741824, 0});
+    // MP2: interleaved 16-bit; nothing is written past the frame (the float copy overran it).
+    std::vector<std::int16_t> s16(6, 7);
+    packed[0] = reinterpret_cast<std::uint8_t*>(s16.data());
+    packSamples(in.data(), 2, 2, SampleLayout{false, 2, false}, packed);
+    CHECK(s16 == std::vector<std::int16_t>{32767, -32768, 16384, 0, 7, 7});
+}
+
 TEST_CASE("access control rejects the wrong streamid and rate limits")
 {
     AccessPolicy policy;

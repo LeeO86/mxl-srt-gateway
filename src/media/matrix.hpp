@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -48,4 +49,16 @@ struct EgressAudioTrack
 
 std::vector<EgressAudioTrack> presetEgress(std::string const& name);
 int defaultAudioBitrate(std::string const& codec, std::string const& layout);
+
+// An audio encoder's input samples: float, or integer at full scale (clipped); 2 or 4 bytes; one
+// plane per channel or one interleaved plane.
+struct SampleLayout
+{
+    bool isFloat = true;
+    int bytes = 4;
+    bool planar = true;
+};
+
+// Interleaved float samples into that layout (`planes`: one per channel when planar).
+void packSamples(float const* interleaved, int frames, int channels, SampleLayout layout, std::uint8_t* const* planes);
 } // namespace srtgw

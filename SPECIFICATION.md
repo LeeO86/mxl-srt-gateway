@@ -315,7 +315,12 @@ corporate firewall. Therefore:
   Codecs: AAC-LC (default; 192 kbit/s per stereo pair, scaled for 5.1/7.1),
   MP2 (mono/stereo), AC-3 only if the encoder is available in the build,
   SMPTE 302M (PCM, transparent, 2/4/6/8 channels per PID — e.g. 16 channels as
-  two 8-channel PIDs), Opus (only if the far end supports it in TS).
+  two 8-channel PIDs), Opus (only if the far end supports it in TS). Each
+  encoder gets its own sample format (302M: 24 bit in 32-bit integers, MP2:
+  16 bit; full scale, clipped); FFmpeg's experimental encoders (302M, its own
+  Opus) are allowed. An encoder that does not open leaves its track out and logs
+  `audio_encoder_failed`. In CBR mode the mux rate adds each encoder's own rate
+  (302M: 48000 × channels × 28 bit/s).
 - Per track: language code (ISO 639) and descriptor in the PMT, gain, mute.
 - Presets mirror §5.5 ("8 × stereo AAC", "16 ch 302M", "5.1 + stereo").
 

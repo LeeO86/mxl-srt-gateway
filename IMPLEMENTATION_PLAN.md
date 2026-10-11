@@ -199,7 +199,7 @@ both.
      on either side;
    - an egress `s302m` track has no audio stream in the TS: FFmpeg's
      `s302m` encoder is experimental and does not open, and its samples are
-     `s32`, not the float the FIFO copies. Not changed here.
+     `s32`, not the float the FIFO copies. Fixed in 1.4.1 (item 11).
 10. **Widgets (1.4.0).** One widget, `channel-status`, as the platform's
     widget contract asks (§7.1). Channels have string ids that can change at
     runtime, so `channel` is a string whose schema `enum` lists the channels
@@ -214,6 +214,24 @@ both.
     headers, so nothing has to be left out on these routes.
     `WIDGET_FRAME_ANCESTORS` is a global setting like the others (restart
     flag); the API reads it on every request, so a saved value is used at once.
+11. **Egress audio sample formats (1.4.1).** The egress FIFO is interleaved
+    float. Each encoder is opened with the first of FLTP, FLT, S32, S32P, S16,
+    S16P that it lists (AAC and AC-3: FLTP; FFmpeg's own Opus: FLTP; 302M:
+    S32, of which it keeps the upper 24 bits; MP2: S16), and `packSamples`
+    (`src/media/matrix.cpp`, FFmpeg-free so the unit tests cover it) converts
+    the FIFO into it: integers at full scale (× 2³¹ or × 2¹⁵), clipped. Before,
+    the FIFO was copied as floats into whatever the encoder took: 302M got the
+    float bits as integers, and MP2's 16-bit frame was overrun by twice its
+    size (a heap corruption at start). `s302m` and `opus` are marked
+    experimental in FFmpeg 7.1; the egress sets `FF_COMPLIANCE_EXPERIMENTAL`
+    for encoders with that capability only. The image's FFmpeg is configured
+    without libopus, so "opus" is FFmpeg's own encoder. FFmpeg's MPEG-TS muxer
+    writes 302M as a private stream with the `BSSD` registration descriptor
+    and warns that it "may not be recognized upon reading"; FFmpeg's demuxer
+    recognises it. Each 302M frame (a grain: 960 samples at 50p, 6724 bytes
+    for stereo) is larger than the muxer's 2930-byte audio PES limit, so every
+    frame is its own PES, which the 302M header needs (FFmpeg's own CLI with
+    small frames merges them and its decoder then reports invalid headers).
 
 ## MXL calls that matter
 
@@ -254,7 +272,7 @@ NMOS transport in v1.
 
 `./build/unit-tests` covers the decision table, synchroniser, cadence, matrix,
 config precedence, access control, v210 stride, audio slices that wrap the
-ring, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
+ring, the egress audio sample formats, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
 `WIDGET_FRAME_ANCESTORS`.
 
 `tests/integration/ci.sh` pushes FFmpeg SRT into an ingest listener, checks

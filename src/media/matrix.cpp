@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace srtgw
 {
@@ -234,5 +235,33 @@ std::vector<EgressAudioTrack> presetEgress(std::string const& name)
         tracks.push_back(track);
     }
     return tracks;
+}
+
+void packSamples(float const* interleaved, int frames, int channels, SampleLayout layout, std::uint8_t* const* planes)
+{
+    for (int i = 0; i < frames; ++i)
+    {
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            float const value = interleaved[i * channels + ch];
+            std::uint8_t* const plane = planes[layout.planar ? ch : 0];
+            std::size_t const at = static_cast<std::size_t>(layout.planar ? i : i * channels + ch) * static_cast<std::size_t>(layout.bytes);
+            if (layout.isFloat)
+            {
+                std::memcpy(plane + at, &value, sizeof(value));
+            }
+            else if (layout.bytes == 4)
+            {
+                // SMPTE 302M keeps the upper 24 bits.
+                auto const sample = static_cast<std::int32_t>(std::lrint(std::clamp(value * 2147483648.0, -2147483648.0, 2147483647.0)));
+                std::memcpy(plane + at, &sample, sizeof(sample));
+            }
+            else
+            {
+                auto const sample = static_cast<std::int16_t>(std::lrint(std::clamp(value * 32768.0, -32768.0, 32767.0)));
+                std::memcpy(plane + at, &sample, sizeof(sample));
+            }
+        }
+    }
 }
 } // namespace srtgw

@@ -503,6 +503,23 @@ AVBufferRef* cudaFramePool(int width, int height)
     return frames;
 }
 
+// An audio encoder's input format: float when it takes it (the egress FIFO is float), else
+// integers (SMPTE 302M: s32, MP2: s16).
+AVSampleFormat audioSampleFormat(AVCodec const* codec)
+{
+    for (AVSampleFormat const wanted : {AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P})
+    {
+        for (auto const* format = codec->sample_fmts; format != nullptr && *format != AV_SAMPLE_FMT_NONE; ++format)
+        {
+            if (*format == wanted)
+            {
+                return wanted;
+            }
+        }
+    }
+    return AV_SAMPLE_FMT_FLTP;
+}
+
 bool openDecoder(AVCodecContext** ctx, AVCodec const* codec, AVCodecParameters const* params, AVBufferRef* hw)
 {
     *ctx = avcodec_alloc_context3(codec);
@@ -1963,11 +1980,17 @@ void EgressPipeline::run()
             int const channels = static_cast<int>(track.channels.size());
             av_channel_layout_default(&ctx->ch_layout, channels);
             ctx->sample_rate = 48000;
-            ctx->sample_fmt = audioCodec->sample_fmts != nullptr ? audioCodec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+            ctx->sample_fmt = audioSampleFormat(audioCodec);
             ctx->bit_rate = track.bitrate > 0 ? track.bitrate : defaultAudioBitrate(track.codec, track.layout);
             ctx->time_base = AVRational{1, 48000};
-            if (avcodec_open2(ctx, audioCodec, nullptr) < 0)
+            // FFmpeg's SMPTE 302M encoder is marked experimental and does not open otherwise.
+            if ((audioCodec->capabilities & AV_CODEC_CAP_EXPERIMENTAL) != 0)
             {
+                ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+            }
+            if (int const opened = avcodec_open2(ctx, audioCodec, nullptr); opened < 0)
+            {
+                log::error("audio_encoder_failed", {{"channel", config_.id}, {"codec", audioName}, {"channels", std::to_string(channels)}, {"error", ffError(opened)}});
                 avcodec_free_context(&ctx);
                 audioEnc.push_back(nullptr);
                 continue;
@@ -2007,12 +2030,13 @@ void EgressPipeline::run()
         av_dict_set(&opts, "mpegts_flags", "resend_headers", 0);
         if (config_.egress.mux == "cbr")
         {
-            int audioBits = 0;
-            for (auto const& track : config_.egress.audioTracks)
+            // The opened encoders' rates: SMPTE 302M sets its own (48000 × channels × 28 bit/s).
+            std::int64_t audioBits = 0;
+            for (auto const* ctx : audioEnc)
             {
-                audioBits += track.bitrate > 0 ? track.bitrate : defaultAudioBitrate(track.codec, track.layout);
+                audioBits += ctx != nullptr ? ctx->bit_rate : 0;
             }
-            int const muxrate = static_cast<int>((config_.egress.bitrate + audioBits) * 1.08);
+            auto const muxrate = static_cast<std::int64_t>(static_cast<double>(config_.egress.bitrate + audioBits) * 1.08);
             av_dict_set(&opts, "muxrate", std::to_string(muxrate).c_str(), 0);
         }
         if (avformat_write_header(mux, &opts) < 0)
@@ -2381,21 +2405,12 @@ void EgressPipeline::run()
                     aframe->sample_rate = 48000;
                     av_channel_layout_copy(&aframe->ch_layout, &audioEnc[t]->ch_layout);
                     av_frame_get_buffer(aframe, 0);
-                    if (audioEnc[t]->sample_fmt == AV_SAMPLE_FMT_FLTP)
-                    {
-                        for (int ch = 0; ch < channels; ++ch)
-                        {
-                            auto* dst = reinterpret_cast<float*>(aframe->data[ch]);
-                            for (int frame = 0; frame < frameSize; ++frame)
-                            {
-                                dst[frame] = audioFifo[t][static_cast<std::size_t>(frame * channels + ch)];
-                            }
-                        }
-                    }
-                    else
-                    {
-                        std::memcpy(aframe->data[0], audioFifo[t].data(), static_cast<std::size_t>(frameSize * channels) * sizeof(float));
-                    }
+                    // In the encoder's format: a float copy into s16 (MP2) overran the frame and
+                    // s32 (SMPTE 302M) took the float bits as integers.
+                    auto const format = audioEnc[t]->sample_fmt;
+                    packSamples(audioFifo[t].data(), frameSize, channels,
+                        SampleLayout{format == AV_SAMPLE_FMT_FLT || format == AV_SAMPLE_FMT_FLTP, av_get_bytes_per_sample(format), av_sample_fmt_is_planar(format) != 0},
+                        aframe->extended_data);
                     audioFifo[t].erase(audioFifo[t].begin(), audioFifo[t].begin() + static_cast<std::ptrdiff_t>(frameSize * channels));
                     aframe->pts = pts;
                     pts += frameSize;

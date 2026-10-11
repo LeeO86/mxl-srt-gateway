@@ -173,6 +173,9 @@ at 50p holds up to about 580 MB per channel.
 Egress reads each output grain's video and audio `egress.read_offset_grains`
 (default 2) source frames before its time, so that the writer has finished
 them, and stamps each encoded audio frame with the time of its first sample.
+Each audio track goes to its encoder in that encoder's sample format (SMPTE
+302M: 24 bit, MP2: 16 bit). A track whose encoder does not open is left out of
+the TS and logs `audio_encoder_failed`.
 
 ## Layout
 

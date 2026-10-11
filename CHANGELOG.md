@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1
+
+### Fixes
+
+Measured on the lab host (1080p50, the egress with NVENC; the player's 1 kHz tone at −18 dBFS; benches in `~/mxl-lab/ss/`).
+
+- An egress SMPTE 302M track was missing from the TS, so the far end got no audio. FFmpeg's `s302m` encoder is marked experimental and did not open, and nothing was logged; it also takes 32-bit integers, and the egress copied its float samples into every encoder as they were. The same copy into MP2's 16-bit samples overran the frame: an egress with an MP2 track crashed at start (exit 139, `malloc(): unsorted double linked list corrupted`). Opus tracks were missing too (the image's FFmpeg has no libopus, and its own Opus encoder is experimental). Each track is now converted to its encoder's sample format (float, or integers at full scale, clipped), FFmpeg's experimental encoders are allowed, and an encoder that does not open logs `audio_encoder_failed` with the codec and the reason. Measured (egress → FFmpeg SRT listener, 10 s, decoded by FFmpeg):
+  - 302M: 1.4.0 no audio stream; now a 2 ch and an 8 ch `s302m` stream, 24 bit, 1000.00 Hz at −18.0 dBFS peak on every channel, −122.8 dB residual after a sine fit;
+  - MP2: 1.4.0 crash; now 1000.00 Hz at −18.1 dBFS (−65 dB residual). Opus: 1.4.0 no stream; now 1000.00 Hz at −17.8 dBFS;
+  - the same egress into an ingest (`audio_preset` `302m-16`): both 302M tracks decoded, 1000.01 Hz at −18.0 dBFS, no silences or clicks in 20 s.
+- With `egress.mux` `cbr` the mux rate counted a 302M track as 0 bit/s. It now adds each encoder's own rate (302M: 48000 × channels × 28 bit/s, 2.69 Mbit/s for stereo, 10.75 Mbit/s for 8 channels).
+- The Compose and Kubernetes examples use the `1.4.1` image.
+
 ## 1.4.0
 
 Operator-screen widgets, as in mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0 (`SPECIFICATION.md` §7.1):
