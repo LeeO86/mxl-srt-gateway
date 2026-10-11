@@ -236,7 +236,8 @@ TEST_CASE("WIDGET_FRAME_ANCESTORS defaults to 'self', is kept on save and must b
     CHECK(loadFromSources({}, "[]", {}).config.widgetFrameAncestors == "'self'");
     auto const set = loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "'self' https://designer.example"}});
     CHECK(set.config.widgetFrameAncestors == "'self' https://designer.example");
-    CHECK(configToJson(set, false).find(R"("WIDGET_FRAME_ANCESTORS":"'self' https://designer.example")") != std::string::npos);
+    std::string error;
+    CHECK(json::fieldString(json::parse(configToJson(set, false), &error), "WIDGET_FRAME_ANCESTORS") == "'self' https://designer.example");
     CHECK(configToEnv(set.config).find("WIDGET_FRAME_ANCESTORS='self' https://designer.example\n") != std::string::npos);
     CHECK_THROWS_AS(loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "'self'; script-src *"}}), ConfigError);
     CHECK_THROWS_AS(loadFromSources({}, "[]", {{"WIDGET_FRAME_ANCESTORS", "https://a.example, https://b.example"}}), ConfigError);
@@ -281,8 +282,8 @@ TEST_CASE("widgets: the list with CORS for listed origins, the page with CSP fra
     CHECK(json::fieldString(widget, "version") == kVersion);
     CHECK(json::field(widget, "min_size")->serialize() == R"({"h":200,"w":360})");
     CHECK(json::field(widget, "params")->serialize() ==
-          R"({"properties":{"channel":{"description":"Channel id (ingest or egress)","enum":["in1","out 2"],"title":"Channel","type":"string"}},)"
-          R"("required":["channel"],"type":"object"})");
+          R"x({"properties":{"channel":{"description":"Channel id (ingest or egress)","enum":["in1","out 2"],"title":"Channel","type":"string"}},)x"
+          R"x("required":["channel"],"type":"object"})x");
     auto const other = get("/widgets", "", "https://evil.example");
     CHECK(other.status == 200);
     CHECK(header(other, "Access-Control-Allow-Origin") == "(none)");
