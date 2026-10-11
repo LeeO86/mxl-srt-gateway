@@ -28,6 +28,7 @@ extern "C"
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <sstream>
 
 namespace srtgw
@@ -503,6 +504,23 @@ AVBufferRef* cudaFramePool(int width, int height)
     return frames;
 }
 
+// An audio encoder's input format: float when it takes it (the egress FIFO is float), else
+// integers (SMPTE 302M: s32, MP2: s16).
+AVSampleFormat audioSampleFormat(AVCodec const* codec)
+{
+    for (AVSampleFormat const wanted : {AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P})
+    {
+        for (auto const* format = codec->sample_fmts; format != nullptr && *format != AV_SAMPLE_FMT_NONE; ++format)
+        {
+            if (*format == wanted)
+            {
+                return wanted;
+            }
+        }
+    }
+    return AV_SAMPLE_FMT_FLTP;
+}
+
 bool openDecoder(AVCodecContext** ctx, AVCodec const* codec, AVCodecParameters const* params, AVBufferRef* hw)
 {
     *ctx = avcodec_alloc_context3(codec);
@@ -557,11 +575,17 @@ struct IngestPipeline::Shared
         std::int64_t endPtsNs = 0;
         bool ptsValid = false;
         AudioAligner aligner;
+        // How late the audio that arrived since the writer's last grain came for its due time.
+        std::int64_t lateNs = INT64_MIN;
     };
     std::vector<AudioQ> audio;
     // The source PTS -> TAI offset (ns) the video frames are stamped with.
     std::int64_t ptsOffsetNs = 0;
     bool haveOffset = false;
+    // Steps of that offset (PtsMapper) the writer has not moved the audio queues by yet.
+    std::int64_t mapStepNs = 0;
+    // Video packet arrival to its picture being ready (decoder, adaptation), smoothed.
+    double codecDelayMs = 0;
     std::string decoder;
     std::string sourceFormat;
     VideoFormat source;
@@ -974,8 +998,14 @@ void IngestPipeline::runIo()
         bool gpuPackFailed = false;
         // Frames the writer's queue keeps (set with the graph).
         std::size_t queueFrames = 8;
-        double offset = 0;
-        bool haveOffset = false;
+        std::int64_t const latencyNs = static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL;
+        std::int64_t const grainNs = 1000000000LL * config_.target.rate.den / config_.target.rate.num;
+        auto const audioOffsetNs = static_cast<std::int64_t>(config_.audioOffsetMs * 1000000.0);
+        // The PTS -> TAI mapping follows the earliest frames; late ones are what sync_latency_ms is for.
+        PtsMapper mapper;
+        mapper.stepNs = std::max<std::int64_t>(40000000, static_cast<std::int64_t>(config_.syncLatencyMs) * 500000LL);
+        // TAI arrival of each video packet by its PTS (ns), for the codec delay.
+        std::map<std::int64_t, std::int64_t> arrivals;
         std::int64_t frameIndex = 0;
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
@@ -993,6 +1023,14 @@ void IngestPipeline::runIo()
             }
             if (packet->stream_index == videoStream)
             {
+                if (packet->pts != AV_NOPTS_VALUE)
+                {
+                    arrivals[av_rescale_q(packet->pts, fmt->streams[videoStream]->time_base, AVRational{1, 1000000000})] = static_cast<std::int64_t>(taiNowNs());
+                    while (arrivals.size() > 256)
+                    {
+                        arrivals.erase(arrivals.begin());
+                    }
+                }
                 if (avcodec_send_packet(videoCtx, packet) >= 0)
                 {
                     while (avcodec_receive_frame(videoCtx, frame) >= 0)
@@ -1134,21 +1172,18 @@ void IngestPipeline::runIo()
                         // A converted picture to the writer thread, stamped on the TAI clock.
                         auto const publishPicture = [&](AVFrame const* picture, std::int64_t ptsNs, std::shared_ptr<std::vector<std::uint8_t> const> bytes,
                                                         std::shared_ptr<AVFrame const> yuv) {
-                            double const now = static_cast<double>(taiNowNs());
-                            double const sample = now - static_cast<double>(ptsNs);
-                            if (!haveOffset)
+                            auto const now = static_cast<std::int64_t>(taiNowNs());
+                            std::int64_t const step = mapper.add(now - ptsNs);
+                            double delayMs = -1;
+                            if (auto const arrived = arrivals.find(ptsNs); arrived != arrivals.end())
                             {
-                                offset = sample;
-                                haveOffset = true;
-                            }
-                            else
-                            {
-                                offset = offset * 0.98 + sample * 0.02;
+                                delayMs = static_cast<double>(now - arrived->second) / 1e6;
+                                arrivals.erase(arrivals.begin(), std::next(arrived));
                             }
                             IngestPipeline::Shared::Frame adapted;
                             adapted.width = picture->width;
                             adapted.height = picture->height;
-                            adapted.ptsNs = ptsNs + static_cast<std::int64_t>(offset);
+                            adapted.ptsNs = ptsNs + mapper.offsetNs;
                             adapted.index = frameIndex++;
                             adapted.bytes = std::move(bytes);
                             adapted.yuv = std::move(yuv);
@@ -1162,8 +1197,13 @@ void IngestPipeline::runIo()
                             }
                             {
                                 std::lock_guard const lock{shared_->mediaMu};
-                                shared_->ptsOffsetNs = static_cast<std::int64_t>(offset);
+                                shared_->ptsOffsetNs = mapper.offsetNs;
+                                shared_->mapStepNs += step;
                                 shared_->haveOffset = true;
+                                if (delayMs >= 0)
+                                {
+                                    shared_->codecDelayMs = shared_->codecDelayMs == 0 ? delayMs : shared_->codecDelayMs * 0.95 + delayMs * 0.05;
+                                }
                                 shared_->frames.push_back(std::move(adapted));
                                 while (shared_->frames.size() > queueFrames)
                                 {
@@ -1285,21 +1325,29 @@ void IngestPipeline::runIo()
                                 queue.channels = channels;
                                 // The stream often says 0 channels until the first frame is decoded (AAC in TS).
                                 queue.info.layout = std::to_string(channels) + "ch";
-                                queue.samples.insert(queue.samples.end(), converted.begin(), converted.begin() + static_cast<std::ptrdiff_t>(got * channels));
-                                queue.missing = false;
-                                queue.lastMs = monoNowMs();
                                 // The writer lines the queue up with the video by these stamps.
                                 std::int64_t const pts = frame->pts != AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
                                 std::int64_t const duration = static_cast<std::int64_t>(got) * 1000000000LL / 48000;
-                                if (pts != AV_NOPTS_VALUE)
+                                std::int64_t const startNs =
+                                    pts != AV_NOPTS_VALUE ? av_rescale_q(pts, fmt->streams[dec.stream]->time_base, AVRational{1, 1000000000}) : queue.endPtsNs;
+                                if (queue.aligner.aligned && shared_->haveOffset)
                                 {
-                                    queue.endPtsNs = av_rescale_q(pts, fmt->streams[dec.stream]->time_base, AVRational{1, 1000000000}) + duration;
-                                    queue.ptsValid = true;
+                                    // Its first sample is due when the writer's grain reaches it: TAI of its
+                                    // PTS + sync_latency_ms - half a grain (+ audio_offset_ms).
+                                    std::int64_t const dueNs = startNs + shared_->ptsOffsetNs + latencyNs - grainNs / 2 + audioOffsetNs;
+                                    queue.lateNs = std::max(queue.lateNs, static_cast<std::int64_t>(taiNowNs()) - dueNs);
                                 }
-                                else
+                                if (queue.ptsValid && !queue.samples.empty())
                                 {
-                                    queue.endPtsNs += duration;
+                                    // A gap in the source's audio (a sender that skipped, lost packets): silence in
+                                    // its place, so the queued samples keep their times.
+                                    queue.samples.insert(queue.samples.end(), static_cast<std::size_t>(gapSamples(startNs - queue.endPtsNs) * channels), 0.f);
                                 }
+                                queue.samples.insert(queue.samples.end(), converted.begin(), converted.begin() + static_cast<std::ptrdiff_t>(got * channels));
+                                queue.missing = false;
+                                queue.lastMs = monoNowMs();
+                                queue.endPtsNs = startNs + duration;
+                                queue.ptsValid = queue.ptsValid || pts != AV_NOPTS_VALUE;
                                 speed = queue.aligner.speed;
                             }
                             // From the next frame on, the aligner's speed: over 2^20 output samples
@@ -1397,6 +1445,8 @@ void IngestPipeline::runClock()
         SrtStats srtStats;
         std::string peer;
         double decodeFps = 0;
+        double codecDelayMs = 0;
+        std::int64_t videoHoldNs = 0;
         {
             std::lock_guard const lock{shared_->mediaMu};
             for (auto const& frame : shared_->frames)
@@ -1413,12 +1463,29 @@ void IngestPipeline::runClock()
             std::int64_t const latencyNs = static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL;
             // audio_offset_ms: + plays the audio later against the video, - earlier.
             auto const audioOffsetNs = static_cast<std::int64_t>(config_.audioOffsetMs * 1000000.0);
+            // The video mapping stepped (PtsMapper): the queued audio moves with the video at once,
+            // + later (silence before it), - earlier (its head dropped).
+            std::int64_t const mapStep = shared_->mapStepNs * 48 / 1000000;
+            shared_->mapStepNs = 0;
             for (std::size_t q = 0; q < shared_->audio.size(); ++q)
             {
                 auto& live = shared_->audio[q];
                 if (live.channels <= 0 || live.samples.empty())
                 {
                     continue;
+                }
+                if (mapStep > 0)
+                {
+                    live.samples.insert(live.samples.begin(), static_cast<std::size_t>(mapStep * live.channels), 0.f);
+                }
+                else if (mapStep < 0)
+                {
+                    auto const queuedNow = static_cast<std::int64_t>(live.samples.size() / static_cast<std::size_t>(live.channels));
+                    live.samples.erase(live.samples.begin(), live.samples.begin() + static_cast<std::ptrdiff_t>(std::min(-mapStep, queuedNow) * live.channels));
+                    if (live.samples.empty())
+                    {
+                        continue;
+                    }
                 }
                 auto const queued = static_cast<std::int64_t>(live.samples.size() / static_cast<std::size_t>(live.channels));
                 std::int64_t const levelNs = queued * 1000000000LL / 48000;
@@ -1431,7 +1498,8 @@ void IngestPipeline::runClock()
                     targetNs -= grainNs / 2;
                 }
                 targetNs -= audioOffsetNs;
-                std::int64_t const correction = live.aligner.add(targetNs - headNs, levelNs - grainNs);
+                std::int64_t const correction = live.aligner.add(targetNs - headNs, live.lateNs);
+                live.lateNs = INT64_MIN;
                 if (correction > 0)
                 {
                     auto const drop = static_cast<std::ptrdiff_t>(std::min(correction, queued) * live.channels);
@@ -1451,6 +1519,8 @@ void IngestPipeline::runClock()
                 }
             }
             audioCopy = shared_->audio;
+            videoHoldNs = shared_->audio.empty() ? 0 : std::min<std::int64_t>(shared_->audio[0].aligner.holdNs, 80000000);
+            codecDelayMs = shared_->codecDelayMs;
             auto const now = monoNowMs();
             if (shared_->decodeWindowMs != 0 && now > shared_->decodeWindowMs)
             {
@@ -1467,7 +1537,10 @@ void IngestPipeline::runClock()
             }
         }
         failover = shared_->active == 1;
-        auto const decision = sync.choose(static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index)), stamps);
+        // The video waits as long as the first track's audio is held (AudioAligner), up to 80 ms, so
+        // lip sync holds while a source sends its audio late; the frame queue keeps 100 ms beyond
+        // sync_latency_ms.
+        auto const decision = sync.choose(static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index)) - videoHoldNs, stamps);
         sync.commit(decision);
         if (decision.repeat)
         {
@@ -1642,6 +1715,7 @@ void IngestPipeline::runClock()
         status.driftPpm = drift;
         status.fifoMs = fifoMs;
         status.decodeFps = decodeFps;
+        status.codecDelayMs = codecDelayMs;
         status.failover = failover;
         status.timecode = timecode;
         status.meters = meters;
@@ -1785,6 +1859,7 @@ void EgressPipeline::run()
     std::uint64_t lastSource = 0;
     bool haveSource = false;
     auto const started = std::chrono::steady_clock::now();
+    std::int64_t lastJpeg = 0;
 
     auto closeMux = [&] {
         if (mux != nullptr)
@@ -1963,11 +2038,17 @@ void EgressPipeline::run()
             int const channels = static_cast<int>(track.channels.size());
             av_channel_layout_default(&ctx->ch_layout, channels);
             ctx->sample_rate = 48000;
-            ctx->sample_fmt = audioCodec->sample_fmts != nullptr ? audioCodec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+            ctx->sample_fmt = audioSampleFormat(audioCodec);
             ctx->bit_rate = track.bitrate > 0 ? track.bitrate : defaultAudioBitrate(track.codec, track.layout);
             ctx->time_base = AVRational{1, 48000};
-            if (avcodec_open2(ctx, audioCodec, nullptr) < 0)
+            // FFmpeg's SMPTE 302M encoder is marked experimental and does not open otherwise.
+            if ((audioCodec->capabilities & AV_CODEC_CAP_EXPERIMENTAL) != 0)
             {
+                ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+            }
+            if (int const opened = avcodec_open2(ctx, audioCodec, nullptr); opened < 0)
+            {
+                log::error("audio_encoder_failed", {{"channel", config_.id}, {"codec", audioName}, {"channels", std::to_string(channels)}, {"error", ffError(opened)}});
                 avcodec_free_context(&ctx);
                 audioEnc.push_back(nullptr);
                 continue;
@@ -2007,12 +2088,13 @@ void EgressPipeline::run()
         av_dict_set(&opts, "mpegts_flags", "resend_headers", 0);
         if (config_.egress.mux == "cbr")
         {
-            int audioBits = 0;
-            for (auto const& track : config_.egress.audioTracks)
+            // The opened encoders' rates: SMPTE 302M sets its own (48000 × channels × 28 bit/s).
+            std::int64_t audioBits = 0;
+            for (auto const* ctx : audioEnc)
             {
-                audioBits += track.bitrate > 0 ? track.bitrate : defaultAudioBitrate(track.codec, track.layout);
+                audioBits += ctx != nullptr ? ctx->bit_rate : 0;
             }
-            int const muxrate = static_cast<int>((config_.egress.bitrate + audioBits) * 1.08);
+            auto const muxrate = static_cast<std::int64_t>(static_cast<double>(config_.egress.bitrate + audioBits) * 1.08);
             av_dict_set(&opts, "muxrate", std::to_string(muxrate).c_str(), 0);
         }
         if (avformat_write_header(mux, &opts) < 0)
@@ -2045,7 +2127,11 @@ void EgressPipeline::run()
     // bytes; the explicit send below is the real output. Both stay so the muxer clock
     // never blocks on a disconnected caller.
     std::uint64_t index = grainIndexNow(config_.target.rate);
+    std::uint64_t const firstIndex = index;
     std::vector<std::vector<float>> audioFifo(config_.egress.audioTracks.size());
+    // Video send time by PTS, for the encoder's delay.
+    std::map<std::int64_t, std::chrono::steady_clock::time_point> sentAt;
+    double codecDelayMs = 0;
     while (!stop_.load())
     {
         std::uint64_t const nowIndex = grainIndexNow(config_.target.rate);
@@ -2058,6 +2144,9 @@ void EgressPipeline::run()
         {
             index = nowIndex;
         }
+        // The PTS follow the output grain's time, so grains skipped by a loop that fell behind leave
+        // a gap. A counter ran slow instead, and the receiver mapped the stream later and later.
+        videoPts = static_cast<std::int64_t>(index - firstIndex);
         auto const videoRoute = routes_(true);
         auto const audioRoute = routes_(false);
         // Video and audio are read this many source frames before the output grain's time.
@@ -2302,11 +2391,23 @@ void EgressPipeline::run()
                 needKeyframe = false;
             }
             auto const encodeStart = std::chrono::steady_clock::now();
+            sentAt[videoPts] = encodeStart;
+            while (sentAt.size() > 64)
+            {
+                sentAt.erase(sentAt.begin());
+            }
             if (avcodec_send_frame(videoEnc, encoded) >= 0)
             {
                 AVPacket* packet = av_packet_alloc();
                 while (avcodec_receive_packet(videoEnc, packet) >= 0)
                 {
+                    // The encoder's delay: lookahead, B-frames, NVENC's queue of frames in flight.
+                    if (auto const sent = sentAt.find(packet->pts); sent != sentAt.end())
+                    {
+                        double const delayMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sent->second).count();
+                        codecDelayMs = codecDelayMs == 0 ? delayMs : codecDelayMs * 0.95 + delayMs * 0.05;
+                        sentAt.erase(sentAt.begin(), std::next(sent));
+                    }
                     av_packet_rescale_ts(packet, videoEnc->time_base, mux->streams[0]->time_base);
                     packet->stream_index = 0;
                     av_interleaved_write_frame(mux, packet);
@@ -2381,21 +2482,12 @@ void EgressPipeline::run()
                     aframe->sample_rate = 48000;
                     av_channel_layout_copy(&aframe->ch_layout, &audioEnc[t]->ch_layout);
                     av_frame_get_buffer(aframe, 0);
-                    if (audioEnc[t]->sample_fmt == AV_SAMPLE_FMT_FLTP)
-                    {
-                        for (int ch = 0; ch < channels; ++ch)
-                        {
-                            auto* dst = reinterpret_cast<float*>(aframe->data[ch]);
-                            for (int frame = 0; frame < frameSize; ++frame)
-                            {
-                                dst[frame] = audioFifo[t][static_cast<std::size_t>(frame * channels + ch)];
-                            }
-                        }
-                    }
-                    else
-                    {
-                        std::memcpy(aframe->data[0], audioFifo[t].data(), static_cast<std::size_t>(frameSize * channels) * sizeof(float));
-                    }
+                    // In the encoder's format: a float copy into s16 (MP2) overran the frame and
+                    // s32 (SMPTE 302M) took the float bits as integers.
+                    auto const format = audioEnc[t]->sample_fmt;
+                    packSamples(audioFifo[t].data(), frameSize, channels,
+                        SampleLayout{format == AV_SAMPLE_FMT_FLT || format == AV_SAMPLE_FMT_FLTP, av_get_bytes_per_sample(format), av_sample_fmt_is_planar(format) != 0},
+                        aframe->extended_data);
                     audioFifo[t].erase(audioFifo[t].begin(), audioFifo[t].begin() + static_cast<std::ptrdiff_t>(frameSize * channels));
                     aframe->pts = pts;
                     pts += frameSize;
@@ -2420,10 +2512,10 @@ void EgressPipeline::run()
             }
         }
         ++frames;
-        ++videoPts;
         ++index;
         PipelineStatus status;
         status.state = state;
+        status.codecDelayMs = codecDelayMs;
         status.srt = primary.stats();
         status.peer = status.srt.peer;
         status.sourceFormat = source.label();
@@ -2438,9 +2530,12 @@ void EgressPipeline::run()
         status.latencyBuckets = status_.latencyBuckets;
         status.failover = config_.backup.enabled && duplicate.connected();
         status.request = publicRequest(config_, config_.announceAddress.empty() ? primaryIpv4() : config_.announceAddress);
-        if (monoNowMs() % 1000 < 40)
+        // Once a second. "The first 40 ms of each second" made a loop that had fallen behind
+        // (it then runs its grains back to back) encode a thumbnail on every one of them.
+        if (monoNowMs() - lastJpeg >= 1000)
         {
             status.jpeg = encodeJpeg(picture, source.width, source.height);
+            lastJpeg = monoNowMs();
         }
         {
             std::lock_guard const lock{statusMu_};

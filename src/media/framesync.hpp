@@ -36,13 +36,14 @@ private:
 };
 
 // Lines an audio queue up with the video. Each grain adds how much older the queue's first
-// sample is than its due time (> 0: the audio is late) and how much audio the queue holds beyond
-// this grain (its headroom); every `window` grains the mean error is acted on (averaging keeps
-// the jitter of the PTS mapping out).
-// - The audio is held (`holdNs`) as late as the window's worst grain needed to keep `marginNs`
-//   of headroom, at once; when less would do, the hold shrinks by at most `releaseNs` per window.
-//   A source that sends its audio in bursts later than the sync latency plays a little late
-//   rather than with gaps.
+// sample is than its due time (> 0: the audio is late) and how late the audio that arrived since
+// the last grain came for its own due time (INT64_MIN: none came); every `window` grains the mean
+// error is acted on (averaging keeps the jitter of the PTS mapping out).
+// - The audio is held (`holdNs`) as late as the window's latest arrival plus `marginNs`: a rise is
+//   inserted at once, and the writer delays the video by as much (lip sync over latency); when
+//   less would do, the hold shrinks by at most `releaseNs` per window. A source that sends its
+//   audio in bursts later than the sync latency plays a little later rather than with gaps. Audio
+//   that is missing from the source is no reason to hold: the audio after the gap comes on time.
 // - Until a mean is within `toleranceNs` (start-up), it is stepped away at once.
 // - Once aligned, the resampler plays the audio slightly faster or slower (`speed`, at most
 //   `maxSpeed`) so the error is gone in about `horizonNs`, without a click; only a mean beyond
@@ -58,7 +59,7 @@ struct AudioAligner
     std::int64_t releaseNs = 500000;
     double maxSpeed = 0.005;
     std::int64_t sumNs = 0;
-    // The most any grain of the window needed the audio later (error - headroom).
+    // The latest arrival of the window (how late, for its due time).
     std::int64_t needNs = INT64_MIN;
     std::int64_t holdNs = 0;
     int count = 0;
@@ -67,6 +68,34 @@ struct AudioAligner
     double speed = 0;
 
     // Samples (48 kHz) to drop from (> 0), or silence to insert at (< 0), the queue's head now.
-    [[nodiscard]] std::int64_t add(std::int64_t errorNs, std::int64_t headroomNs);
+    [[nodiscard]] std::int64_t add(std::int64_t errorNs, std::int64_t lateNs);
 };
+
+// The source PTS -> TAI offset of an ingest's video, from TAI - PTS when each frame is ready.
+// Frames that come late (a sender's bursts, a busy decoder) must not move it, the sync latency
+// absorbs them, so it follows the earliest frames: the minimum of each `window` frames.
+// - The first frame sets it; until the first window is complete it follows the lowest one.
+// - A window minimum within `stepNs` moves it by at most `slewNs` (a source clock that drifts).
+// - Two window minimums in a row beyond `stepNs` (a jump in the source timestamps, a source that
+//   arrives earlier or later for good) step it to the second one; add() returns the step.
+struct PtsMapper
+{
+    int window = 50;
+    std::int64_t stepNs = 60000000;
+    std::int64_t slewNs = 1000000;
+    std::int64_t offsetNs = 0;
+    bool valid = false;
+    bool started = false;
+    std::int64_t windowMinNs = INT64_MAX;
+    int count = 0;
+    int beyond = 0;
+
+    // Adds a frame's TAI - PTS; returns how far the offset stepped (0 when it did not).
+    [[nodiscard]] std::int64_t add(std::int64_t sampleNs);
+};
+
+// Silence (48 kHz samples) to queue before decoded audio that starts `gapNs` after the queued audio
+// ends: a gap in the source timestamps (lost or skipped frames) then keeps the queued samples on
+// their times. Below 2 ms it is rounding; beyond 1 s it is a jump, which the aligner steps.
+[[nodiscard]] std::int64_t gapSamples(std::int64_t gapNs);
 } // namespace srtgw

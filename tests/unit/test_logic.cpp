@@ -637,16 +637,16 @@ TEST_CASE("frame synchroniser resyncs when the next frames have left the buffer"
 TEST_CASE("audio aligner steps until the start-up error is within the tolerance")
 {
     std::int64_t const ms = 1000000;
-    // A queue with plenty of audio beyond each grain.
-    std::int64_t const queued = 2000 * ms;
+    // No audio arrives late for its due time.
+    std::int64_t const onTime = INT64_MIN;
     // 1.3.0 on the lab: the queue kept ~1 s of start-up audio, its first sample ~960 ms older
     // than the sync latency asks for. After one window all of it is dropped at once.
     AudioAligner late;
     for (int grain = 0; grain < 24; ++grain)
     {
-        CHECK(late.add(960 * ms, queued) == 0);
+        CHECK(late.add(960 * ms, onTime) == 0);
     }
-    CHECK(late.add(960 * ms, queued) == 960 * 48);
+    CHECK(late.add(960 * ms, onTime) == 960 * 48);
     CHECK(late.speed == 0.0);
     // A backlog is late audio, not a short queue: nothing is held.
     CHECK(late.holdNs == 0);
@@ -654,14 +654,14 @@ TEST_CASE("audio aligner steps until the start-up error is within the tolerance"
     std::int64_t dropped = 0;
     for (int grain = 0; grain < 25; ++grain)
     {
-        dropped += late.add(64 * ms, queued);
+        dropped += late.add(64 * ms, onTime);
     }
     CHECK(dropped == 64 * 48);
     CHECK_FALSE(late.aligned);
     // Within 20 ms: aligned, the rest is left to the resampler.
     for (int grain = 0; grain < 25; ++grain)
     {
-        CHECK(late.add(15 * ms, queued) == 0);
+        CHECK(late.add(15 * ms, onTime) == 0);
     }
     CHECK(late.aligned);
     // Audio due later than the output: silence is inserted in front of it.
@@ -669,7 +669,7 @@ TEST_CASE("audio aligner steps until the start-up error is within the tolerance"
     std::int64_t inserted = 0;
     for (int grain = 0; grain < 25; ++grain)
     {
-        inserted += early.add(-70 * ms, queued);
+        inserted += early.add(-70 * ms, onTime);
     }
     CHECK(inserted == -70 * 48);
 }
@@ -677,13 +677,13 @@ TEST_CASE("audio aligner steps until the start-up error is within the tolerance"
 TEST_CASE("audio aligner corrects small errors by speed, large ones by a step")
 {
     std::int64_t const ms = 1000000;
-    std::int64_t const queued = 2000 * ms;
+    std::int64_t const onTime = INT64_MIN;
     AudioAligner aligner;
     auto window = [&](std::int64_t errorNs) {
         std::int64_t moved = 0;
         for (int grain = 0; grain < aligner.window; ++grain)
         {
-            moved += aligner.add(errorNs, queued);
+            moved += aligner.add(errorNs, onTime);
         }
         return moved;
     };
@@ -699,7 +699,7 @@ TEST_CASE("audio aligner corrects small errors by speed, large ones by a step")
     for (int grain = 0; grain < aligner.window; ++grain)
     {
         std::int64_t const jitter = grain == aligner.window - 1 ? 0 : (grain % 2 == 0 ? 60 : -60);
-        CHECK(aligner.add((4 + jitter) * ms, queued) == 0);
+        CHECK(aligner.add((4 + jitter) * ms, onTime) == 0);
     }
     CHECK(aligner.speed == doctest::Approx(0.002));
     // Up to the step threshold the speed is clamped to 0.5 %, nothing is stepped.
@@ -725,7 +725,8 @@ TEST_CASE("audio aligner keeps the queue from running dry")
         std::int64_t moved = 0;
         for (int grain = 0; grain < bursts.window; ++grain)
         {
-            moved += bursts.add(errorNs, grain % 6 == 5 ? lowNs : 100 * ms);
+            // Every 6th grain a burst arrives, as late as the queue ran short (error - headroom).
+            moved += bursts.add(errorNs, grain % 6 == 5 ? errorNs - lowNs : INT64_MIN);
         }
         return moved;
     };
@@ -741,22 +742,68 @@ TEST_CASE("audio aligner keeps the queue from running dry")
     CHECK(window(40 * ms, 30 * ms) == 0);
     CHECK(bursts.holdNs == 39500000);
     CHECK(bursts.speed == doctest::Approx(0.00025));
-    // A later burst (5 ms short of a grain, 38 ms late) holds 53 ms at once: slower, no step.
-    CHECK(window(38 * ms, -5 * ms) == 0);
+    // A later burst (5 ms short of a grain, 38 ms late) holds 53 ms at once: the 13.5 ms more is
+    // inserted now (the video waits as long), the rest is a small speed.
+    CHECK(window(38 * ms, -5 * ms) == -648);
     CHECK(bursts.holdNs == 53 * ms);
-    CHECK(bursts.speed == doctest::Approx(-0.005));
+    CHECK(bursts.speed == doctest::Approx(-0.00075));
     // Audio early by the mapping and a short queue ask for the same delay: it is not added twice.
     AudioAligner early;
     for (int grain = 0; grain < early.window; ++grain)
     {
-        CHECK(early.add(0, 100 * ms) == 0);
+        CHECK(early.add(0, -100 * ms) == 0);
     }
     for (int grain = 0; grain < early.window; ++grain)
     {
-        CHECK(early.add(-60 * ms, grain % 6 == 5 ? 0 : 100 * ms) == 0);
+        CHECK(early.add(-60 * ms, grain % 6 == 5 ? -60 * ms : -160 * ms) == 0);
     }
     CHECK(early.holdNs == 0);
     CHECK(early.speed == doctest::Approx(-0.005));
+}
+
+TEST_CASE("the PTS mapping follows the earliest frames and steps only for a lasting change")
+{
+    std::int64_t const ms = 1000000;
+    PtsMapper mapper;
+    mapper.window = 5;
+    auto window = [&](std::int64_t lowest, std::vector<std::int64_t> const& late) {
+        std::int64_t step = mapper.add(lowest * ms);
+        for (auto const extra : late)
+        {
+            step += mapper.add((lowest + extra) * ms);
+        }
+        return step;
+    };
+    // Start-up: the first frame, then the lowest one; the first window's minimum.
+    CHECK(mapper.add(1000 * ms) == 0);
+    CHECK(mapper.offsetNs == 1000 * ms);
+    CHECK(window(900, {50, 5, 20}) == 0);
+    CHECK(mapper.offsetNs == 900 * ms);
+    // Late frames (a sender's bursts, a busy decoder) do not move it.
+    CHECK(window(900, {80, 40, 60, 10}) == 0);
+    CHECK(mapper.offsetNs == 900 * ms);
+    // A drifting source clock: at most 1 ms per window.
+    CHECK(window(903, {30, 30, 30, 30}) == 0);
+    CHECK(mapper.offsetNs == 901 * ms);
+    // One window of only late frames does not step it...
+    CHECK(window(1000, {10, 10, 10, 10}) == 0);
+    CHECK(window(901, {10, 10, 10, 10}) == 0);
+    CHECK(mapper.offsetNs == 901 * ms);
+    // ...two in a row do, and add() returns the step (the audio moves by it at once).
+    CHECK(window(1101, {10, 10, 10, 10}) == 0);
+    CHECK(window(1101, {10, 10, 10, 10}) == 200 * ms);
+    CHECK(mapper.offsetNs == 1101 * ms);
+    CHECK(window(1001, {0, 0, 0, 0}) == 0);
+    CHECK(window(1001, {0, 0, 0, 0}) == -100 * ms);
+}
+
+TEST_CASE("a gap in the source audio is filled with silence, rounding and jumps are not")
+{
+    CHECK(gapSamples(1000000) == 0);
+    CHECK(gapSamples(-30000000) == 0);
+    CHECK(gapSamples(21333333) == 1023);
+    CHECK(gapSamples(100000000) == 4800);
+    CHECK(gapSamples(2000000000) == 0);
 }
 
 TEST_CASE("channel map applies gain and silence")
@@ -805,6 +852,27 @@ TEST_CASE("channel map applies gain and silence")
     CHECK(egress[1].channels.front() == 8);
     CHECK(defaultAudioBitrate("aac", "stereo") == 192000);
     CHECK(defaultAudioBitrate("aac", "5.1") == 384000);
+}
+
+TEST_CASE("egress audio is packed in the encoder's sample format")
+{
+    // Two frames of stereo: full scale and beyond, then half scale and silence.
+    std::vector<float> const in = {1.5f, -1.5f, 0.5f, 0.f};
+    std::vector<float> left(2), right(2);
+    std::uint8_t* planar[2] = {reinterpret_cast<std::uint8_t*>(left.data()), reinterpret_cast<std::uint8_t*>(right.data())};
+    packSamples(in.data(), 2, 2, SampleLayout{true, 4, true}, planar);
+    CHECK(left == std::vector<float>{1.5f, 0.5f});
+    CHECK(right == std::vector<float>{-1.5f, 0.f});
+    // SMPTE 302M: interleaved 32-bit integers, clipped at full scale.
+    std::vector<std::int32_t> s32(4);
+    std::uint8_t* packed[1] = {reinterpret_cast<std::uint8_t*>(s32.data())};
+    packSamples(in.data(), 2, 2, SampleLayout{false, 4, false}, packed);
+    CHECK(s32 == std::vector<std::int32_t>{2147483647, -2147483647 - 1, 1073741824, 0});
+    // MP2: interleaved 16-bit; nothing is written past the frame (the float copy overran it).
+    std::vector<std::int16_t> s16(6, 7);
+    packed[0] = reinterpret_cast<std::uint8_t*>(s16.data());
+    packSamples(in.data(), 2, 2, SampleLayout{false, 2, false}, packed);
+    CHECK(s16 == std::vector<std::int16_t>{32767, -32768, 16384, 0, 7, 7});
 }
 
 TEST_CASE("access control rejects the wrong streamid and rate limits")
@@ -1063,12 +1131,14 @@ TEST_CASE("metrics render the channel set")
     channel.encodeLatencyCount = 4;
     channel.encodeLatencySum = 0.04;
     channel.encodeLatencyBuckets = {1, 3, 0, 0, 0, 0, 0, 0};
+    channel.codecDelayMs = 12.5;
     metrics.channels.push_back(channel);
     metrics.nvdecSessions = 1;
     auto const text = renderMetrics(metrics);
     CHECK(text.find("mxl_srt_gateway_channel_state{channel=\"in1\"} 4") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_framesync_repeats_total{channel=\"in1\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_info{channel=\"in1\"") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_codec_delay_ms{channel=\"in1\"} 12.5") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_nvdec_sessions 1") != std::string::npos);
     CHECK(stateCode("no_signal") == 3);
 }

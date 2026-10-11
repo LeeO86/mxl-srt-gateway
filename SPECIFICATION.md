@@ -206,9 +206,16 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
   presentation time is ≤ output time − `sync_latency_ms` (default 120 ms,
   0–2000). The adapted frames wait for it in a queue that holds
   `sync_latency_ms` + 100 ms of them (at least 8).
-- Source timestamps are mapped to the local timeline with a smoothed offset; the
-  synchroniser **repeats** a frame when the source is slow and **drops** one when
-  it is fast. Repeat/drop events are counted (metrics) and spaced, not bursty.
+- Source timestamps are mapped to the local timeline with an offset that follows
+  the earliest frames: the minimum of TAI − PTS (when a decoded frame is ready)
+  over 50 frames. A window minimum within max(40 ms, `sync_latency_ms` / 2)
+  moves it by at most 1 ms (a drifting source clock); two in a row beyond that
+  (a jump in the source timestamps, a source that now arrives earlier or later
+  for good) step it, and the queued audio moves by the same step at once. Frames
+  that come late (a sender's bursts, a busy decoder) are what `sync_latency_ms`
+  absorbs; they do not move the mapping. The synchroniser **repeats** a frame
+  when the source is slow and **drops** one when it is fast. Repeat/drop events
+  are counted (metrics) and spaced, not bursty.
 - Audio is resampled to 48 kHz float32 (libswresample's own engine, 64-tap
   filters, always on, also 48 → 48 kHz; soxr has no drift compensation) and
   queued with its source timestamps. Before each grain, the writer lines the
@@ -223,11 +230,15 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
     that falls behind are corrected without a click;
   - a mean error beyond 100 ms (a jump in the source timestamps, a long stall)
     is stepped again, and the alignment starts over;
-  - the audio is held as late as the worst of those grains needed to keep
-    10 ms of audio beyond it, at once; when less would do, the hold shrinks by
-    at most 0.5 ms per 25 grains. A source that sends its audio in bursts later
-    than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little late
-    rather than with gaps.
+  - the audio is held as late as the latest audio of those grains arrived for
+    its due time, plus 10 ms: a rise is inserted at once and the video waits
+    as long (up to 80 ms, the first track's hold); when less would do, the hold
+    shrinks by at most 0.5 ms per 25 grains. A source that sends its audio in
+    bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little
+    later, in lip sync, rather than with gaps;
+  - a gap in the source's audio timestamps (a sender that skipped grains, lost
+    packets) is filled with silence where it is, so the queued audio keeps its
+    times; audio that is missing is no reason to hold.
   Output is always at exactly the grain cadence (e.g. 960 samples per grain at
   50, 1601/1602 cadence at 59.94). `audio_drift_ppm` is the resampling
   correction of the first track (samples dropped + or inserted − per sample
@@ -236,7 +247,10 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 - Lip sync: video and audio share the same mapped timeline; a per-channel
   `audio_offset_ms` (−1000 to 1000, default 0; + plays the audio later)
   corrects source offsets: it moves the time the ingest lines the audio up
-  with. Egress channels ignore it.
+  with. Egress channels ignore it. Codec delays (encoder lookahead and
+  B-frames, NVENC's frames in flight, decoder reordering, NVDEC's queue) are
+  carried by the timestamps: they add latency, not an A/V offset, and are
+  reported per channel as `codec_delay_ms`.
 - Loss of signal: hold the last frame for `hold_ms` (default 500), then black or
   slate (configurable, slate shows the channel label and "NO SIGNAL"); audio goes
   to silence. **The MXL flows keep running** at TAI; NMOS state does not change.
@@ -295,6 +309,10 @@ corporate firewall. Therefore:
   declared rate; the offset counts frames. Audio is read at the same offset:
   the output grain's samples, `read_offset_grains` source frames earlier.
   Each encoded audio frame is stamped with the time of its first sample.
+- The stream's timestamps follow the output grain's TAI time. A loop that falls
+  more than 4 grains behind continues at the current grain; the grains it
+  skipped leave a gap in the video and audio timestamps, so the stream's clock
+  stays TAI's.
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
@@ -315,7 +333,12 @@ corporate firewall. Therefore:
   Codecs: AAC-LC (default; 192 kbit/s per stereo pair, scaled for 5.1/7.1),
   MP2 (mono/stereo), AC-3 only if the encoder is available in the build,
   SMPTE 302M (PCM, transparent, 2/4/6/8 channels per PID — e.g. 16 channels as
-  two 8-channel PIDs), Opus (only if the far end supports it in TS).
+  two 8-channel PIDs), Opus (only if the far end supports it in TS). Each
+  encoder gets its own sample format (302M: 24 bit in 32-bit integers, MP2:
+  16 bit; full scale, clipped); FFmpeg's experimental encoders (302M, its own
+  Opus) are allowed. An encoder that does not open leaves its track out and logs
+  `audio_encoder_failed`. In CBR mode the mux rate adds each encoder's own rate
+  (302M: 48000 × channels × 28 bit/s).
 - Per track: language code (ISO 639) and descriptor in the PMT, gain, mute.
 - Presets mirror §5.5 ("8 × stereo AAC", "16 ch 302M", "5.1 + stereo").
 
@@ -415,7 +438,9 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 `srt_pkt_retrans_total`, `srt_pkt_drop_total`, `srt_bitrate_bps`,
 `srt_buffer_ms`, `srt_connected`, `video_frames_out_total`, `framesync_repeats_total`,
 `framesync_drops_total`, `audio_drift_ppm`, `audio_fifo_ms`, `decode_errors_total`,
-`decode_fps`, `encode_fps`, `encode_latency_seconds` (histogram), `codec_info`
+`decode_fps`, `encode_fps`, `codec_delay_ms` (video codec delay, smoothed:
+ingest from a packet's arrival to its picture, egress from a frame into the
+encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
 plus process and GPU (`nvenc_sessions`, `nvdec_sessions`, GPU memory).
 Grafana dashboard in `deploy/grafana/`.

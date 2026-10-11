@@ -194,12 +194,13 @@ both.
      (idle +18…−2, one −65). The egress stays exact (0 drops, its TS on
      time), but its packets leave in bursts of up to 4 grains. The ingest's
      video follows the PTS mapping at once (repeat/drop), and its audio
-     follows at ≤ 0.5 %;
+     follows at ≤ 0.5 %. Fixed in 1.4.1 (item 12);
    - the FFmpeg chain's priming offset (+21 ms for AAC) is not compensated
-     on either side;
+     on either side. Measured again in 1.4.1 (item 13): an artefact of the
+     FFmpeg CLI's decoding, not of the gateway pair;
    - an egress `s302m` track has no audio stream in the TS: FFmpeg's
      `s302m` encoder is experimental and does not open, and its samples are
-     `s32`, not the float the FIFO copies. Not changed here.
+     `s32`, not the float the FIFO copies. Fixed in 1.4.1 (item 11).
 10. **Widgets (1.4.0).** One widget, `channel-status`, as the platform's
     widget contract asks (§7.1). Channels have string ids that can change at
     runtime, so `channel` is a string whose schema `enum` lists the channels
@@ -214,6 +215,88 @@ both.
     headers, so nothing has to be left out on these routes.
     `WIDGET_FRAME_ANCESTORS` is a global setting like the others (restart
     flag); the API reads it on every request, so a saved value is used at once.
+11. **Egress audio sample formats (1.4.1).** The egress FIFO is interleaved
+    float. Each encoder is opened with the first of FLTP, FLT, S32, S32P, S16,
+    S16P that it lists (AAC and AC-3: FLTP; FFmpeg's own Opus: FLTP; 302M:
+    S32, of which it keeps the upper 24 bits; MP2: S16), and `packSamples`
+    (`src/media/matrix.cpp`, FFmpeg-free so the unit tests cover it) converts
+    the FIFO into it: integers at full scale (× 2³¹ or × 2¹⁵), clipped. Before,
+    the FIFO was copied as floats into whatever the encoder took: 302M got the
+    float bits as integers, and MP2's 16-bit frame was overrun by twice its
+    size (a heap corruption at start). `s302m` and `opus` are marked
+    experimental in FFmpeg 7.1; the egress sets `FF_COMPLIANCE_EXPERIMENTAL`
+    for encoders with that capability only. The image's FFmpeg is configured
+    without libopus, so "opus" is FFmpeg's own encoder. FFmpeg's MPEG-TS muxer
+    writes 302M as a private stream with the `BSSD` registration descriptor
+    and warns that it "may not be recognized upon reading"; FFmpeg's demuxer
+    recognises it. Each 302M frame (a grain: 960 samples at 50p, 6724 bytes
+    for stereo) is larger than the muxer's 2930-byte audio PES limit, so every
+    frame is its own PES, which the 302M header needs (FFmpeg's own CLI with
+    small frames merges them and its decoder then reports invalid headers).
+12. **Loop lip sync under load (1.4.1).** Item 9's swing (−173…+33 ms and one
+    −1033 ms under load on the egress CPUs) had three causes, found with a lab
+    build that logged the mapping, the aligner and the egress loop once a
+    second (`~/mxl-lab/ss/dbgpatch.py`):
+    - The egress stamped its video with a frame counter. A loop that falls
+      more than 4 grains behind jumps to the current grain, so the stream's
+      clock ran slow by every skipped grain (45 of 50 grains a second on the
+      lab with the bench's 8 AAC tracks, idle). `videoPts` is now the output
+      grain index since the start, and the audio follows it, so skipped grains
+      leave a gap and the clock stays TAI's.
+    - The ingest's PTS-to-TAI offset was the mean (EMA, 1 s) of TAI − PTS when
+      each frame is ready. It followed that clock and every burst; the video
+      moved at once and the audio at ≤ 0.5 %, or stepped beyond 100 ms. It is
+      now `PtsMapper` (`src/media/framesync.cpp`): the minimum of 50 frames;
+      within max(40 ms, `sync_latency_ms` / 2) it moves by at most 1 ms per
+      window, beyond that for two windows it steps, and `mapStepNs` moves every
+      audio queue by the same amount at the writer's next grain (silence in
+      front, or its head dropped). Late frames are what the sync latency is for.
+    - The hold (item 8) took a short queue as late audio. During a gap in the
+      source it rose to the gap's length and then came down at 1 ms/s, so the
+      audio played up to 113 ms late for a minute after load. The hold is now
+      taken from each decoded audio frame's arrival against its first sample's
+      due time (TAI of its PTS + `sync_latency_ms` − half a grain), and a gap
+      in the source PTS is filled with silence in the queue (`gapSamples`,
+      2 ms to 1 s), so the audio after a gap is on time and not held. For a
+      contiguous burst both measures are the same. The video now waits as long
+      as the first track's audio is held (the synchroniser is asked for the
+      grain's time minus the hold, at most 80 ms: the frame queue keeps 100 ms
+      beyond `sync_latency_ms`), and a rise of the hold is inserted into the
+      audio at once instead of being slewed at 0.5 %. Before, the audio played
+      the hold later than its video. With FFmpeg's bursty TS audio (item 8) the
+      video is now that much later too.
+    The egress also made a thumbnail on every grain of the first 40 ms of each
+    second: a loop that had fallen behind runs its grains back to back and
+    encoded several. It is once a second now. Open: an egress channel whose
+    document has no `egress.audio_tracks` or `audio_preset` keeps the channel
+    default (`8x-stereo-aac`, from `defaultIngest`); its 8 FFmpeg AAC
+    encoders (twoloop coder) take about 0.9 of a core in the egress loop on the
+    lab host, so that egress skips grains even idle there. The bench (avs3,
+    ss) used that config. A smaller default is the platform's decision.
+13. **Codec delay (1.4.1).** The loop's idle offset of −40…−60 ms that 1.3.1
+    reported came from the egress reading its audio two grains ahead (item 9,
+    fixed in 1.3.2). With one stereo track the loop now measures 302M −1 ms
+    and AAC +5…+11 ms idle; the video is shown in 20 ms steps, so a run lands
+    anywhere within ±10 ms. Codec delays sit in the timestamps and add latency,
+    not an offset: the egress stamps frames before they enter the encoder, and
+    the ingest maps a frame when its picture is ready, so the decoder's delay is
+    part of the mapping for the video and, through it, for the audio.
+    `codec_delay_ms` reports them: on ingest the time from a video packet's
+    demux to its picture being published (decoder reordering, frame threads,
+    NVDEC's queue, adaptation; packets are matched by PTS, so a deinterlacer's
+    second field is not counted), on egress from `avcodec_send_frame` to the
+    packet with that PTS (lookahead, B-frames, NVENC's frames in flight);
+    each an exponential average over about 20 frames. Per path on the lab:
+    NVENC p4/ull 41 ms (two frames in flight), x264 `zerolatency` 5.5 ms,
+    NVENC with 2 B-frames 164 ms; CPU h264 decode 3 ms (25 ms with B-frames),
+    NVDEC 81 ms. The loop's latency grows with them (video 440–620 ms), its
+    A/V offset stays within −11…+11 ms on every path.
+    FFmpeg's own CLI decodes the AAC track of one egress TS 21 ms after its
+    302M track of the same channels (MP2 +10, AC-3 +5): the "+21 ms priming"
+    of item 9. GStreamer (tsdemux with avdec_aac, avdec_s302m, mpg123,
+    a52dec) puts all four at the same time, faad 22 ms earlier, and the
+    gateway's ingest (libavcodec frames by their packet PTS) +6 ms. The CLI's
+    figure is its own; no codec compensation is added.
 
 ## MXL calls that matter
 
@@ -254,7 +337,8 @@ NMOS transport in v1.
 
 `./build/unit-tests` covers the decision table, synchroniser, cadence, matrix,
 config precedence, access control, v210 stride, audio slices that wrap the
-ring, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
+ring, the egress audio sample formats, the PTS mapping (window minimum,
+drift, steps), the audio gap fill, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
 `WIDGET_FRAME_ANCESTORS`.
 
 `tests/integration/ci.sh` pushes FFmpeg SRT into an ingest listener, checks

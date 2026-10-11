@@ -41,6 +41,9 @@ struct PipelineStatus
     double fifoMs = 0;
     std::uint64_t decodeErrors = 0;
     double decodeFps = 0;
+    // Video codec delay (ms), smoothed: ingest from a packet's arrival to its picture, egress from a
+    // frame into the encoder to its packet.
+    double codecDelayMs = 0;
     double encodeFps = 0;
     bool failover = false;
     std::string timecode;
