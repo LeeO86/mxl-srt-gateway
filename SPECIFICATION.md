@@ -247,7 +247,10 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 - Lip sync: video and audio share the same mapped timeline; a per-channel
   `audio_offset_ms` (−1000 to 1000, default 0; + plays the audio later)
   corrects source offsets: it moves the time the ingest lines the audio up
-  with. Egress channels ignore it.
+  with. Egress channels ignore it. Codec delays (encoder lookahead and
+  B-frames, NVENC's frames in flight, decoder reordering, NVDEC's queue) are
+  carried by the timestamps: they add latency, not an A/V offset, and are
+  reported per channel as `codec_delay_ms`.
 - Loss of signal: hold the last frame for `hold_ms` (default 500), then black or
   slate (configurable, slate shows the channel label and "NO SIGNAL"); audio goes
   to silence. **The MXL flows keep running** at TAI; NMOS state does not change.
@@ -435,7 +438,9 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 `srt_pkt_retrans_total`, `srt_pkt_drop_total`, `srt_bitrate_bps`,
 `srt_buffer_ms`, `srt_connected`, `video_frames_out_total`, `framesync_repeats_total`,
 `framesync_drops_total`, `audio_drift_ppm`, `audio_fifo_ms`, `decode_errors_total`,
-`decode_fps`, `encode_fps`, `encode_latency_seconds` (histogram), `codec_info`
+`decode_fps`, `encode_fps`, `codec_delay_ms` (video codec delay, smoothed:
+ingest from a packet's arrival to its picture, egress from a frame into the
+encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
 plus process and GPU (`nvenc_sessions`, `nvdec_sessions`, GPU memory).
 Grafana dashboard in `deploy/grafana/`.

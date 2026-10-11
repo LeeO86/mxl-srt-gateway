@@ -37,6 +37,18 @@ Measured on the lab host (1080p50, the egress with NVENC; the player's 1 kHz ton
 - An egress channel whose document has neither `egress.audio_tracks` nor `egress.audio_preset` keeps the channel default of 8 stereo AAC tracks (`8x-stereo-aac`). Their encoders take about 0.9 of a core on the lab host, and such an egress skipped grains there even idle (the loop bench used that config). Not changed; documented in the README.
 - The Compose and Kubernetes examples use the `1.4.1` image.
 
+### Added
+
+- `codec_delay_ms` per channel (channel status, metric `mxl_srt_gateway_codec_delay_ms`): the video codec delay, averaged over about 20 frames. Ingest: from a packet's arrival to its decoded (and adapted) picture. Egress: from a frame into the encoder to its packet (lookahead, B-frames, NVENC's frames in flight). The timestamps carry these delays, so they add latency and do not move lip sync; nothing is compensated. Measured on the lab host, loop idle, one stereo track:
+  | Path (egress → ingest) | egress `codec_delay_ms` | ingest `codec_delay_ms` | loop latency (video) | loop A/V |
+  | --- | --- | --- | --- | --- |
+  | NVENC p4/ull → CPU decode (default) | 41 ms | 3 ms | 460–480 ms | −11…+10 ms |
+  | x264 `zerolatency` → CPU decode | 5.5 ms | 2.6 ms | 480 ms | −7…−4 ms |
+  | NVENC → NVDEC | 41 ms | 81 ms | 540–560 ms | −10…+11 ms |
+  | NVENC with 2 B-frames → CPU decode | 164 ms | 25 ms | 620 ms | −11…+9 ms |
+  | NVENC → CPU decode, 302M instead of AAC | 41 ms | 3 ms | 440 ms | +7…+8 ms |
+  The −40…−60 ms idle offset that 1.3.1 reported was the egress reading its audio two grains ahead, fixed in 1.3.2. The "+21 ms AAC priming" of 1.3.2 is how FFmpeg's command-line tool times decoded AAC (MP2 +10, AC-3 +5): GStreamer's decoders put AAC, MP2, AC-3 and 302M of the same channels at the same time, and the gateway's own ingest measures AAC within 10 ms of 302M.
+
 ## 1.4.0
 
 Operator-screen widgets, as in mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0 (`SPECIFICATION.md` §7.1):

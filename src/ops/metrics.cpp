@@ -73,6 +73,7 @@ std::string renderMetrics(ProcessMetrics const& metrics)
         gauge(out, "audio_fifo_ms", id, channel.audioFifoMs);
         counter(out, "decode_errors_total", id, channel.decodeErrors);
         gauge(out, "decode_fps", id, channel.decodeFps);
+        gauge(out, "codec_delay_ms", id, channel.codecDelayMs);
         gauge(out, "encode_fps", id, channel.encodeFps);
         gauge(out, "failover_active", id, channel.failoverActive);
         out << "mxl_srt_gateway_codec_info{channel=\"" << id << "\",decoder=\"" << channel.decoder << "\",encoder=\"" << channel.encoder

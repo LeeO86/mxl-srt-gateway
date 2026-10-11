@@ -23,6 +23,7 @@ struct ChannelMetrics
     std::uint64_t drops = 0;
     double audioDriftPpm = 0;
     double audioFifoMs = 0;
+    double codecDelayMs = 0;
     std::uint64_t decodeErrors = 0;
     double decodeFps = 0;
     double encodeFps = 0;

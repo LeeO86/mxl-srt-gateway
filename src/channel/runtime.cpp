@@ -460,7 +460,7 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << "\",\"peer\":\"" << jsonEscape(status.peer) << "\",\"source_format\":\"" << jsonEscape(status.sourceFormat) << "\",\"target_format\":\""
         << jsonEscape(status.targetFormat.empty() ? channel.target.label() : status.targetFormat) << "\",\"decoder\":\"" << jsonEscape(status.decoder)
         << "\",\"encoder\":\"" << jsonEscape(status.encoder) << "\",\"frames\":" << status.frames << ",\"repeats\":" << status.repeats << ",\"drops\":" << status.drops
-        << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"decode_fps\":" << status.decodeFps
+        << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
         << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
         << ",\"loss\":" << status.srt.pktLoss << ",\"retrans\":" << status.srt.pktRetrans << ",\"drop\":" << status.srt.pktDrop
@@ -566,6 +566,7 @@ ProcessMetrics ChannelManager::metrics() const
         item.audioFifoMs = status.fifoMs;
         item.decodeErrors = status.decodeErrors;
         item.decodeFps = status.decodeFps;
+        item.codecDelayMs = status.codecDelayMs;
         item.encodeFps = status.encodeFps;
         item.encodeLatencyCount = status.encodeLatencyCount;
         item.encodeLatencySum = status.encodeLatencySum;

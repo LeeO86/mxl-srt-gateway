@@ -28,6 +28,7 @@ extern "C"
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <sstream>
 
 namespace srtgw
@@ -583,6 +584,8 @@ struct IngestPipeline::Shared
     bool haveOffset = false;
     // Steps of that offset (PtsMapper) the writer has not moved the audio queues by yet.
     std::int64_t mapStepNs = 0;
+    // Video packet arrival to its picture being ready (decoder, adaptation), smoothed.
+    double codecDelayMs = 0;
     std::string decoder;
     std::string sourceFormat;
     VideoFormat source;
@@ -1001,6 +1004,8 @@ void IngestPipeline::runIo()
         // The PTS -> TAI mapping follows the earliest frames; late ones are what sync_latency_ms is for.
         PtsMapper mapper;
         mapper.stepNs = std::max<std::int64_t>(40000000, static_cast<std::int64_t>(config_.syncLatencyMs) * 500000LL);
+        // TAI arrival of each video packet by its PTS (ns), for the codec delay.
+        std::map<std::int64_t, std::int64_t> arrivals;
         std::int64_t frameIndex = 0;
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
@@ -1018,6 +1023,14 @@ void IngestPipeline::runIo()
             }
             if (packet->stream_index == videoStream)
             {
+                if (packet->pts != AV_NOPTS_VALUE)
+                {
+                    arrivals[av_rescale_q(packet->pts, fmt->streams[videoStream]->time_base, AVRational{1, 1000000000})] = static_cast<std::int64_t>(taiNowNs());
+                    while (arrivals.size() > 256)
+                    {
+                        arrivals.erase(arrivals.begin());
+                    }
+                }
                 if (avcodec_send_packet(videoCtx, packet) >= 0)
                 {
                     while (avcodec_receive_frame(videoCtx, frame) >= 0)
@@ -1161,6 +1174,12 @@ void IngestPipeline::runIo()
                                                         std::shared_ptr<AVFrame const> yuv) {
                             auto const now = static_cast<std::int64_t>(taiNowNs());
                             std::int64_t const step = mapper.add(now - ptsNs);
+                            double delayMs = -1;
+                            if (auto const arrived = arrivals.find(ptsNs); arrived != arrivals.end())
+                            {
+                                delayMs = static_cast<double>(now - arrived->second) / 1e6;
+                                arrivals.erase(arrivals.begin(), std::next(arrived));
+                            }
                             IngestPipeline::Shared::Frame adapted;
                             adapted.width = picture->width;
                             adapted.height = picture->height;
@@ -1181,6 +1200,10 @@ void IngestPipeline::runIo()
                                 shared_->ptsOffsetNs = mapper.offsetNs;
                                 shared_->mapStepNs += step;
                                 shared_->haveOffset = true;
+                                if (delayMs >= 0)
+                                {
+                                    shared_->codecDelayMs = shared_->codecDelayMs == 0 ? delayMs : shared_->codecDelayMs * 0.95 + delayMs * 0.05;
+                                }
                                 shared_->frames.push_back(std::move(adapted));
                                 while (shared_->frames.size() > queueFrames)
                                 {
@@ -1422,6 +1445,7 @@ void IngestPipeline::runClock()
         SrtStats srtStats;
         std::string peer;
         double decodeFps = 0;
+        double codecDelayMs = 0;
         std::int64_t videoHoldNs = 0;
         {
             std::lock_guard const lock{shared_->mediaMu};
@@ -1496,6 +1520,7 @@ void IngestPipeline::runClock()
             }
             audioCopy = shared_->audio;
             videoHoldNs = shared_->audio.empty() ? 0 : std::min<std::int64_t>(shared_->audio[0].aligner.holdNs, 80000000);
+            codecDelayMs = shared_->codecDelayMs;
             auto const now = monoNowMs();
             if (shared_->decodeWindowMs != 0 && now > shared_->decodeWindowMs)
             {
@@ -1690,6 +1715,7 @@ void IngestPipeline::runClock()
         status.driftPpm = drift;
         status.fifoMs = fifoMs;
         status.decodeFps = decodeFps;
+        status.codecDelayMs = codecDelayMs;
         status.failover = failover;
         status.timecode = timecode;
         status.meters = meters;
@@ -2103,6 +2129,9 @@ void EgressPipeline::run()
     std::uint64_t index = grainIndexNow(config_.target.rate);
     std::uint64_t const firstIndex = index;
     std::vector<std::vector<float>> audioFifo(config_.egress.audioTracks.size());
+    // Video send time by PTS, for the encoder's delay.
+    std::map<std::int64_t, std::chrono::steady_clock::time_point> sentAt;
+    double codecDelayMs = 0;
     while (!stop_.load())
     {
         std::uint64_t const nowIndex = grainIndexNow(config_.target.rate);
@@ -2362,11 +2391,23 @@ void EgressPipeline::run()
                 needKeyframe = false;
             }
             auto const encodeStart = std::chrono::steady_clock::now();
+            sentAt[videoPts] = encodeStart;
+            while (sentAt.size() > 64)
+            {
+                sentAt.erase(sentAt.begin());
+            }
             if (avcodec_send_frame(videoEnc, encoded) >= 0)
             {
                 AVPacket* packet = av_packet_alloc();
                 while (avcodec_receive_packet(videoEnc, packet) >= 0)
                 {
+                    // The encoder's delay: lookahead, B-frames, NVENC's queue of frames in flight.
+                    if (auto const sent = sentAt.find(packet->pts); sent != sentAt.end())
+                    {
+                        double const delayMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sent->second).count();
+                        codecDelayMs = codecDelayMs == 0 ? delayMs : codecDelayMs * 0.95 + delayMs * 0.05;
+                        sentAt.erase(sentAt.begin(), std::next(sent));
+                    }
                     av_packet_rescale_ts(packet, videoEnc->time_base, mux->streams[0]->time_base);
                     packet->stream_index = 0;
                     av_interleaved_write_frame(mux, packet);
@@ -2474,6 +2515,7 @@ void EgressPipeline::run()
         ++index;
         PipelineStatus status;
         status.state = state;
+        status.codecDelayMs = codecDelayMs;
         status.srt = primary.stats();
         status.peer = status.srt.peer;
         status.sourceFormat = source.label();

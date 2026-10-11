@@ -196,7 +196,8 @@ both.
      video follows the PTS mapping at once (repeat/drop), and its audio
      follows at ≤ 0.5 %. Fixed in 1.4.1 (item 12);
    - the FFmpeg chain's priming offset (+21 ms for AAC) is not compensated
-     on either side;
+     on either side. Measured again in 1.4.1 (item 13): an artefact of the
+     FFmpeg CLI's decoding, not of the gateway pair;
    - an egress `s302m` track has no audio stream in the TS: FFmpeg's
      `s302m` encoder is experimental and does not open, and its samples are
      `s32`, not the float the FIFO copies. Fixed in 1.4.1 (item 11).
@@ -272,6 +273,30 @@ both.
     encoders (twoloop coder) take about 0.9 of a core in the egress loop on the
     lab host, so that egress skips grains even idle there. The bench (avs3,
     ss) used that config. A smaller default is the platform's decision.
+13. **Codec delay (1.4.1).** The loop's idle offset of −40…−60 ms that 1.3.1
+    reported came from the egress reading its audio two grains ahead (item 9,
+    fixed in 1.3.2). With one stereo track the loop now measures 302M −1 ms
+    and AAC +5…+11 ms idle; the video is shown in 20 ms steps, so a run lands
+    anywhere within ±10 ms. Codec delays sit in the timestamps and add latency,
+    not an offset: the egress stamps frames before they enter the encoder, and
+    the ingest maps a frame when its picture is ready, so the decoder's delay is
+    part of the mapping for the video and, through it, for the audio.
+    `codec_delay_ms` reports them: on ingest the time from a video packet's
+    demux to its picture being published (decoder reordering, frame threads,
+    NVDEC's queue, adaptation; packets are matched by PTS, so a deinterlacer's
+    second field is not counted), on egress from `avcodec_send_frame` to the
+    packet with that PTS (lookahead, B-frames, NVENC's frames in flight);
+    each an exponential average over about 20 frames. Per path on the lab:
+    NVENC p4/ull 41 ms (two frames in flight), x264 `zerolatency` 5.5 ms,
+    NVENC with 2 B-frames 164 ms; CPU h264 decode 3 ms (25 ms with B-frames),
+    NVDEC 81 ms. The loop's latency grows with them (video 440–620 ms), its
+    A/V offset stays within −11…+11 ms on every path.
+    FFmpeg's own CLI decodes the AAC track of one egress TS 21 ms after its
+    302M track of the same channels (MP2 +10, AC-3 +5): the "+21 ms priming"
+    of item 9. GStreamer (tsdemux with avdec_aac, avdec_s302m, mpg123,
+    a52dec) puts all four at the same time, faad 22 ms earlier, and the
+    gateway's ingest (libavcodec frames by their packet PTS) +6 ms. The CLI's
+    figure is its own; no codec compensation is added.
 
 ## MXL calls that matter
 
