@@ -1,5 +1,6 @@
 #include "ops/api.hpp"
 
+#include "ops/widgets.hpp"
 #include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 #include "version.hpp"
@@ -59,6 +60,10 @@ HttpResponse Api::handle(HttpRequest const& request) const
         if (request.path == "/" || request.path == "/index.html")
         {
             return text(200, indexHtml_, "text/html; charset=utf-8");
+        }
+        if (isWidgetPath(request.path))
+        {
+            return widgetResponse(store_.config(), request, request.header("Origin"), indexHtml_);
         }
         if (request.path == "/livez")
         {

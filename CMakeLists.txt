@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-srt-gateway
-    VERSION 1.3.2
+    VERSION 1.4.0
     DESCRIPTION "SRT contribution gateway for MXL"
     LANGUAGES CXX
 )
@@ -39,6 +39,7 @@ set(SRTGW_CORE_SOURCES
     src/config/store.cpp
     src/nmos/ids.cpp
     src/ops/metrics.cpp
+    src/ops/widgets.cpp
 )
 
 add_library(srtgw-core STATIC ${SRTGW_CORE_SOURCES})
@@ -143,6 +144,7 @@ if(SRTGW_HAVE_MEDIA)
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SettingsTab.vue
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/SrtEndpoint.vue
         ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/StatusTab.vue
+        ${CMAKE_CURRENT_SOURCE_DIR}/web/src/components/WidgetPage.vue
     )
     set(WEBUI_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/ops/webui_generated.hpp)
     option(SRTGW_USE_PREBUILT_WEBUI "Embed web/dist/index.html instead of running npm" OFF)

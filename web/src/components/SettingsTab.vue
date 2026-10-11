@@ -20,6 +20,7 @@ const GROUPS = [
 // One line per key, from the README settings table.
 const DESCRIPTIONS = {
   WEB_PORT: "This UI, the REST API, /livez, /readyz and /metrics.",
+  WIDGET_FRAME_ANCESTORS: "Pages that may frame the widgets (CSP frame-ancestors), e.g. 'self' https://designer.example.",
   NMOS_PORT: "IS-04/IS-05 node API; the WebSocket is the next port.",
   SRT_PORT_RANGE: "Listener ports this process may bind (e.g. 9000-9099).",
   MXL_DOMAIN_SCAN_PATH: "Parent of every domain directory, mirrors included.",

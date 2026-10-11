@@ -168,6 +168,7 @@ void ConfigStore::replaceGlobals(std::map<std::string, std::string> const& value
         {"NMOS_LABEL", loaded_.config.nmosLabel},
         {"NMOS_TAGS", loaded_.config.nmosTagsJson},
         {"WEB_PORT", std::to_string(loaded_.config.webPort)},
+        {"WIDGET_FRAME_ANCESTORS", loaded_.config.widgetFrameAncestors},
         {"LOG_LEVEL", loaded_.config.logLevel},
         {"NMOS_HOST_ADDRESS", loaded_.config.hostAddress},
         {"SRTGW_PUBLIC_IP", loaded_.config.hostAddress},

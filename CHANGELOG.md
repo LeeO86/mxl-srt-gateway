@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0
+
+Operator-screen widgets, as in mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0 (`SPECIFICATION.md` §7.1):
+
+- `GET /widgets` lists one widget, `channel-status` (`channel`: a configured channel id, required; `min_size` 360×200). GET only (405 otherwise). It answers CORS only for an `Origin` that `WIDGET_FRAME_ANCESTORS` lists, with `Vary: Origin`.
+- `GET /widget/channel-status?channel=<id>[&theme=dark|light|transparent]` is one channel without the app around it, on the gateway's own API: name, direction, state, listening or calling until a peer is connected and then the peer, backup or second destination on air, source and target format, rate, RTT, lost and retransmitted packets, configured latency, SRT buffer, dropped packets, the MXL audio meters (ingest), errors and alarms, and Start/Stop (the channel's `enabled`; Stop asks once more). An unknown channel or theme answers 400, an unknown widget 404.
+- New setting `WIDGET_FRAME_ANCESTORS` (default `'self'`): the widget pages' `Content-Security-Policy: frame-ancestors`. They send no `X-Frame-Options`. `;`, `,` or control characters are refused (exit 78, or 400 from `PUT /api/v1/config`).
+- The page posts `{type: "widget-ready"}` and `{type: "widget-size", w, h}` to the page that frames it.
+- A 405 answer now carries the reason `Method Not Allowed` (it said `OK`).
+- The Compose and Kubernetes examples use the `1.4.0` image.
+
 ## 1.3.2
 
 ### Fixes

@@ -317,6 +317,10 @@ void HttpServer::handle(int fd)
     {
         reason = "Not Found";
     }
+    else if (response.status == 405)
+    {
+        reason = "Method Not Allowed";
+    }
     else if (response.status == 500)
     {
         reason = "Internal Server Error";

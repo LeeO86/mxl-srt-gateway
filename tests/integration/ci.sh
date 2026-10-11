@@ -138,6 +138,14 @@ if curl -fsS http://127.0.0.1:18120/api/v1/channels/edge | grep -q "correct-hors
 fi
 echo "passphrase masked"
 
+# Widgets through the HTTP server: the list, the page with its CSP, the refusals.
+curl -fsS http://127.0.0.1:18120/widgets | grep -q '"id":"channel-status"'
+HEADERS="$(curl -fsS -D - -o /dev/null "http://127.0.0.1:18120/widget/channel-status?channel=ingest-listen")"
+grep -qi "^content-security-policy: frame-ancestors 'self'" <<<"$HEADERS"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18120/widgets)" = 405 ]
+[ "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18120/widget/channel-status?channel=nope')" = 400 ]
+echo "widgets served"
+
 kill -TERM "$GW" || true
 for _ in $(seq 1 40); do
   if ! kill -0 "$GW" 2>/dev/null; then

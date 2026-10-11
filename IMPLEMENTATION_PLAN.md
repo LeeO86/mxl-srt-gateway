@@ -53,6 +53,8 @@ both.
   SRT loop still run.
 - `src/nmos` — UUIDv5 ids and, when `SRTGW_WITH_NMOS=ON`, one nmos-cpp node.
 - `src/ops` — HTTP, WebSocket `/api/v1/events`, Prometheus text, the Vue UI.
+  `widgets.cpp` (in the core library, so the unit tests reach it) answers
+  `/widgets` and `/widget/<id>` (§7.1).
 - `web/` — Vue 3, Vite, inlined to one HTML file.
 
 ## Deviations
@@ -198,6 +200,20 @@ both.
    - an egress `s302m` track has no audio stream in the TS: FFmpeg's
      `s302m` encoder is experimental and does not open, and its samples are
      `s32`, not the float the FIFO copies. Not changed here.
+10. **Widgets (1.4.0).** One widget, `channel-status`, as the platform's
+    widget contract asks (§7.1). Channels have string ids that can change at
+    runtime, so `channel` is a string whose schema `enum` lists the channels
+    configured when `/widgets` is asked; the page route checks the id against
+    the current configuration (400 otherwise). Start/Stop is the channel's
+    `enabled` (the Channels tab's Enable/Disable) and restarts only that
+    channel; Stop needs a second click within 3 s. No picture: at 360×200 the
+    SRT numbers and meters take the space, and the thumbnail is on the
+    dashboard. `/widget/<id>` serves the same single-file page as `/`;
+    `main.js` mounts `WidgetPage` for those paths, and it uses the same store
+    (REST and the WebSocket) as the app. The gateway's API sends no CORS
+    headers, so nothing has to be left out on these routes.
+    `WIDGET_FRAME_ANCESTORS` is a global setting like the others (restart
+    flag); the API reads it on every request, so a saved value is used at once.
 
 ## MXL calls that matter
 
@@ -238,12 +254,14 @@ NMOS transport in v1.
 
 `./build/unit-tests` covers the decision table, synchroniser, cadence, matrix,
 config precedence, access control, v210 stride, audio slices that wrap the
-ring and metrics text.
+ring, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
+`WIDGET_FRAME_ANCESTORS`.
 
 `tests/integration/ci.sh` pushes FFmpeg SRT into an ingest listener, checks
 format and frame count, pulls the egress listener and checks H.264 720p, checks
-caller mode, and checks that an `internet` listener logs a stream-id reject
-without returning the passphrase. Set `SRTGW_TEST_SECONDS=60` for the long TAI
+caller mode, checks that an `internet` listener logs a stream-id reject
+without returning the passphrase, and fetches the widget routes through the
+HTTP server. Set `SRTGW_TEST_SECONDS=60` for the long TAI
 run. `tests/nmos/amwa.sh` is the AMWA suite runner, not part of default CI.
 
 Hardware numbers for A4000 and L4 are recorded by the procedure in

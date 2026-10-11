@@ -350,6 +350,30 @@ corporate firewall. Therefore:
 - Unauthenticated by design (lab network), like the siblings; SRT passphrases are
   write-only in the UI and never returned by the API.
 
+### 7.1 Widgets (1.4.0, operator screens)
+
+The contract of mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0.
+
+- `GET /widgets` answers `[{id, title, params, min_size: {w, h}, version}]` (`params` a
+  JSON schema of the query). It carries `Access-Control-Allow-Origin` for an `Origin`
+  that `WIDGET_FRAME_ANCESTORS` lists (or `*`), and `Vary: Origin`; GET only (405 otherwise).
+- `channel-status` (`channel`, required: the id of a configured channel, listed as the
+  schema's `enum`; `min_size` 360×200): one channel's name, direction and state; listening
+  (listener), calling (caller) or rendezvous until a peer is connected, then the peer;
+  backup input or second destination on air; source and target format; rate, RTT, lost
+  and retransmitted packets, configured SRT latency, SRT buffer, dropped packets; the MXL
+  audio meters (ingest); the error and alarms; Start/Stop, which sets the channel's
+  `enabled` (Stop asks once more within 3 s).
+- `GET /widget/channel-status?channel=<id>[&theme=dark|light|transparent]` is the embedded
+  page with only that widget, no app chrome, on the gateway's own API (same origin,
+  WebSocket `/api/v1/events` included). An invalid parameter answers 400, an unknown widget
+  404. These routes carry `Content-Security-Policy: frame-ancestors <WIDGET_FRAME_ANCESTORS>`
+  and no `X-Frame-Options`.
+- The page posts `{type: "widget-ready"}` once it shows the channel, and
+  `{type: "widget-size", w, h}` then and on every resize, to `window.parent`.
+- No video preview: the pictures are JPEG thumbnails, so the platform's preview contract
+  (`PREVIEW_*`) does not apply.
+
 ---
 
 ## 8. Configuration
@@ -377,7 +401,8 @@ configuration exits 78; global changes flagged `restart_required`.
 | `NMOS_LABEL` | unset | node and device label. Unset keeps the previous labels |
 | `NMOS_TAGS` | empty | JSON object of tag to string array, on the node and device |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | announced address. `SRTGW_PUBLIC_IP` is the same setting |
-| `WEB_PORT` | 8120 | UI, REST, health, metrics |
+| `WEB_PORT` | 8120 | UI, REST, health, metrics, widgets |
+| `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the widget pages (§7.1). `;`, `,` or control characters are invalid |
 | `LOG_LEVEL` | `info` | JSON logs |
 
 Defaults do not collide with the sibling defaults under host networking.
