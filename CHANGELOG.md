@@ -11,6 +11,30 @@ Measured on the lab host (1080p50, the egress with NVENC; the player's 1 kHz ton
   - MP2: 1.4.0 crash; now 1000.00 Hz at −18.1 dBFS (−65 dB residual). Opus: 1.4.0 no stream; now 1000.00 Hz at −17.8 dBFS;
   - the same egress into an ingest (`audio_preset` `302m-16`): both 302M tracks decoded, 1000.01 Hz at −18.0 dBFS, no silences or clicks in 20 s.
 - With `egress.mux` `cbr` the mux rate counted a 302M track as 0 bit/s. It now adds each encoder's own rate (302M: 48000 × channels × 28 bit/s, 2.69 Mbit/s for stereo, 10.75 Mbit/s for 8 channels).
+- The A/V offset of the SRT loop (egress → SRT → ingest) moved under CPU load: −173…+33 ms with one −1033 ms outlier in the 1.3.2 release check. Three causes:
+  - an egress loop that falls more than 4 grains behind jumps to the current grain, but its video was stamped with a frame counter, so the stream's clock ran slow by every skipped grain. Its timestamps now follow the output grain's TAI time: skipped grains leave a gap;
+  - the ingest mapped source time to TAI with the mean arrival of the frames. It followed that clock and every burst of late frames, and the video moved at once while the audio could follow at 0.5 %. The mapping now follows the earliest frames (the minimum over 50 frames): late frames use up `sync_latency_ms` instead of moving it; it moves by at most 1 ms per window for a drifting source and steps only when it is off by more than max(40 ms, `sync_latency_ms` / 2) for two windows, and the queued audio steps with it at once;
+  - while audio was missing from the source, the ingest took the short queue as late audio and held the audio back by up to the gap (up to 113 ms on the lab), released by 1 ms/s, while the video stayed on time. The hold now comes from how late the audio actually arrives for its due time; a rise is inserted at once and the video waits as long (up to 80 ms), so a source that sends its audio late costs latency, not lip sync. A gap in the source audio's timestamps is filled with silence where it is.
+  - The egress also encoded a thumbnail on every grain of the first 40 ms of each second, several when its loop had fallen behind. It is once a second now.
+
+  Measured on the lab host (`~/mxl-lab/ss/ss-loop`: test player → egress with NVENC → SRT → ingest with CPU decode; load = 2 busy loops on each of the egress's or the ingest's 4 CPUs; 5 pattern pauses per phase; + = audio late). The video is shown in 20 ms steps, so a run lands anywhere within ±10 ms:
+
+  | Phase | 1.4.0, one AAC track | 1.4.1, one AAC track |
+  | --- | --- | --- |
+  | idle | +5…+6 ms | −10…+11 ms |
+  | load on the egress | +6…+7 ms | −11…+11 ms |
+  | idle again | +5…+6 ms | −11…+10 ms |
+  | load on the ingest | +5…+6 ms | −10…+12 ms |
+
+  With one track the 1.4.0 egress keeps up and the loop was already stable; the swing needs an egress that falls behind, as the bench's 8 AAC tracks did (next entry): that egress skipped 13 % of its grains idle and up to half under load, so some pattern pauses lost their flash or beep and are left out:
+
+  | Phase | 1.4.0, 8 AAC tracks | 1.4.1, 8 AAC tracks |
+  | --- | --- | --- |
+  | idle | −114…+116 ms, sliding | +3…+11 ms |
+  | load on the egress | no flash or beep found | 0…+25 ms, one beep −77 ms |
+  | idle again | +852…+992 ms | −5…+13 ms |
+  | load on the ingest | +773…+935 ms | −6…+4 ms, one −26 ms |
+- An egress channel whose document has neither `egress.audio_tracks` nor `egress.audio_preset` keeps the channel default of 8 stereo AAC tracks (`8x-stereo-aac`). Their encoders take about 0.9 of a core on the lab host, and such an egress skipped grains there even idle (the loop bench used that config). Not changed; documented in the README.
 - The Compose and Kubernetes examples use the `1.4.1` image.
 
 ## 1.4.0

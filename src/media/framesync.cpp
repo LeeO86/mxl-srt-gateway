@@ -91,26 +91,71 @@ void FrameSynchroniser::reset()
     lastIndex_ = -1;
 }
 
-std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t headroomNs)
+std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t lateNs)
 {
     sumNs += errorNs;
-    needNs = std::max(needNs, errorNs - headroomNs);
+    needNs = std::max(needNs, lateNs);
     if (++count < window)
     {
         return 0;
     }
+    std::int64_t const before = holdNs;
     holdNs = std::max({std::int64_t{0}, needNs + marginNs, holdNs - releaseNs});
+    // A hold that rises is inserted at once, the video waits as long (holdNs); the rest is slewed.
+    std::int64_t const attack = std::max<std::int64_t>(0, holdNs - before);
     std::int64_t const mean = sumNs / count - holdNs;
     sumNs = 0;
     needNs = INT64_MIN;
     count = 0;
-    if (aligned && mean >= -stepNs && mean <= stepNs)
+    if (aligned && mean + attack >= -stepNs && mean + attack <= stepNs)
     {
-        speed = std::clamp(static_cast<double>(mean) / static_cast<double>(horizonNs), -maxSpeed, maxSpeed);
-        return 0;
+        speed = std::clamp(static_cast<double>(mean + attack) / static_cast<double>(horizonNs), -maxSpeed, maxSpeed);
+        return -attack * 48 / 1000000;
     }
     speed = 0;
     aligned = mean >= -toleranceNs && mean <= toleranceNs;
     return aligned ? 0 : mean * 48 / 1000000;
+}
+
+std::int64_t PtsMapper::add(std::int64_t sampleNs)
+{
+    if (!valid || (!started && sampleNs < offsetNs))
+    {
+        offsetNs = sampleNs;
+        valid = true;
+    }
+    windowMinNs = std::min(windowMinNs, sampleNs);
+    if (++count < window)
+    {
+        return 0;
+    }
+    std::int64_t const minNs = windowMinNs;
+    windowMinNs = INT64_MAX;
+    count = 0;
+    if (!started)
+    {
+        started = true;
+        offsetNs = minNs;
+        return 0;
+    }
+    std::int64_t const error = minNs - offsetNs;
+    if (error > stepNs || error < -stepNs)
+    {
+        if (++beyond < 2)
+        {
+            return 0;
+        }
+        beyond = 0;
+        offsetNs = minNs;
+        return error;
+    }
+    beyond = 0;
+    offsetNs += std::clamp(error, -slewNs, slewNs);
+    return 0;
+}
+
+std::int64_t gapSamples(std::int64_t gapNs)
+{
+    return gapNs > 2000000 && gapNs < 1000000000 ? gapNs * 48 / 1000000 : 0;
 }
 } // namespace srtgw

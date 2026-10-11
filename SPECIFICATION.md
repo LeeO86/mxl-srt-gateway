@@ -206,9 +206,16 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
   presentation time is ≤ output time − `sync_latency_ms` (default 120 ms,
   0–2000). The adapted frames wait for it in a queue that holds
   `sync_latency_ms` + 100 ms of them (at least 8).
-- Source timestamps are mapped to the local timeline with a smoothed offset; the
-  synchroniser **repeats** a frame when the source is slow and **drops** one when
-  it is fast. Repeat/drop events are counted (metrics) and spaced, not bursty.
+- Source timestamps are mapped to the local timeline with an offset that follows
+  the earliest frames: the minimum of TAI − PTS (when a decoded frame is ready)
+  over 50 frames. A window minimum within max(40 ms, `sync_latency_ms` / 2)
+  moves it by at most 1 ms (a drifting source clock); two in a row beyond that
+  (a jump in the source timestamps, a source that now arrives earlier or later
+  for good) step it, and the queued audio moves by the same step at once. Frames
+  that come late (a sender's bursts, a busy decoder) are what `sync_latency_ms`
+  absorbs; they do not move the mapping. The synchroniser **repeats** a frame
+  when the source is slow and **drops** one when it is fast. Repeat/drop events
+  are counted (metrics) and spaced, not bursty.
 - Audio is resampled to 48 kHz float32 (libswresample's own engine, 64-tap
   filters, always on, also 48 → 48 kHz; soxr has no drift compensation) and
   queued with its source timestamps. Before each grain, the writer lines the
@@ -223,11 +230,15 @@ colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
     that falls behind are corrected without a click;
   - a mean error beyond 100 ms (a jump in the source timestamps, a long stall)
     is stepped again, and the alignment starts over;
-  - the audio is held as late as the worst of those grains needed to keep
-    10 ms of audio beyond it, at once; when less would do, the hold shrinks by
-    at most 0.5 ms per 25 grains. A source that sends its audio in bursts later
-    than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little late
-    rather than with gaps.
+  - the audio is held as late as the latest audio of those grains arrived for
+    its due time, plus 10 ms: a rise is inserted at once and the video waits
+    as long (up to 80 ms, the first track's hold); when less would do, the hold
+    shrinks by at most 0.5 ms per 25 grains. A source that sends its audio in
+    bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little
+    later, in lip sync, rather than with gaps;
+  - a gap in the source's audio timestamps (a sender that skipped grains, lost
+    packets) is filled with silence where it is, so the queued audio keeps its
+    times; audio that is missing is no reason to hold.
   Output is always at exactly the grain cadence (e.g. 960 samples per grain at
   50, 1601/1602 cadence at 59.94). `audio_drift_ppm` is the resampling
   correction of the first track (samples dropped + or inserted − per sample
@@ -295,6 +306,10 @@ corporate firewall. Therefore:
   declared rate; the offset counts frames. Audio is read at the same offset:
   the output grain's samples, `read_offset_grains` source frames earlier.
   Each encoded audio frame is stamped with the time of its first sample.
+- The stream's timestamps follow the output grain's TAI time. A loop that falls
+  more than 4 grains behind continues at the current grain; the grains it
+  skipped leave a gap in the video and audio timestamps, so the stream's clock
+  stays TAI's.
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.

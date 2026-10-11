@@ -151,13 +151,20 @@ CPU at 8 × 1080p50 on the lab host and kept p95 encode latency at ≤ 10 ms
 
 Ingest audio follows the video: each track is queued with its source
 timestamps and plays `sync_latency_ms` after the time its PTS maps to, like the
-video frames. At the start the gateway drops or inserts samples until the error
+video frames. The mapping follows the earliest video frames (the minimum over
+50 frames), so frames that come late (a sender's bursts, a busy decoder) use up
+`sync_latency_ms` instead of moving it; it moves by at most 1 ms per window for
+a drifting source and steps only when it is off by more than
+max(40 ms, `sync_latency_ms` / 2) for two windows, and the queued audio steps
+with it. A gap in the source audio's timestamps is filled with silence where it
+is. At the start the gateway drops or inserts samples until the error
 is within 20 ms. After that the resampler plays the audio up to 0.5 % faster or
 slower, so a drifting source or a decoder that falls behind does not click. An
 error beyond 100 ms (a timestamp jump, a long stall) is stepped again. Audio
 that arrives in bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer
-does that) is held back until the queue no longer runs dry, and released
-slowly: a little late rather than with gaps. `audio_offset_ms` (−1000 to 1000,
+does that) is held back as late as it arrived, and released slowly, and the
+video waits as long (up to 80 ms): a little later, in lip sync, rather than
+with gaps. `audio_offset_ms` (−1000 to 1000,
 +: later) moves an ingest channel's audio against its video, for a source that
 is out of lip sync; egress ignores it. In the channel status,
 `audio_fifo_ms` is the queued audio and `audio_drift_ppm` the first track's
@@ -173,9 +180,15 @@ at 50p holds up to about 580 MB per channel.
 Egress reads each output grain's video and audio `egress.read_offset_grains`
 (default 2) source frames before its time, so that the writer has finished
 them, and stamps each encoded audio frame with the time of its first sample.
+Its timestamps follow the output grain's TAI time: a loop that falls more than
+4 grains behind continues at the current grain and leaves a gap.
 Each audio track goes to its encoder in that encoder's sample format (SMPTE
 302M: 24 bit, MP2: 16 bit). A track whose encoder does not open is left out of
-the TS and logs `audio_encoder_failed`.
+the TS and logs `audio_encoder_failed`. An egress channel whose document has
+neither `egress.audio_tracks` nor `egress.audio_preset` keeps the channel
+default, 8 stereo AAC tracks of MXL channels 1–16 (`8x-stereo-aac`); on the
+lab host those 8 encoders take about 0.9 of a core in the egress loop. Set
+`audio_preset` (`stereo` is one track of channels 1–2) or the tracks.
 
 ## Layout
 
