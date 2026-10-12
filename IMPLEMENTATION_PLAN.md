@@ -311,6 +311,11 @@ both.
     `nvdec_unavailable` and `nvdec_fallback`, and the channel status has
     `video_codec_hw`, from the decoder or encoder name (`_cuvid` → `nvdec`,
     `_nvenc` → `nvenc`, else `none`; empty before the codec opens).
+    Lab check (NVENC egress → SRT → NVDEC ingest, both `/metrics` scraped
+    every second for 30 s, `execve` traced with bpftrace by cgroup): 1.4.1
+    30 `nvidia-smi` execs in the two containers, 1.4.2 none and no other
+    exec either. Sampling `ps` once a second did not catch 1.4.1's
+    short-lived `nvidia-smi`; the trace did.
 
 ## MXL calls that matter
 
