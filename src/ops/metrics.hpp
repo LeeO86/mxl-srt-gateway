@@ -41,12 +41,12 @@ struct ProcessMetrics
 {
     double residentBytes = 0;
     double cpuSeconds = 0;
-    int nvencSessions = 0;
-    int nvdecSessions = 0;
-    double gpuMemoryBytes = 0;
     std::vector<ChannelMetrics> channels;
 };
 
 std::string renderMetrics(ProcessMetrics const& metrics);
 int stateCode(std::string const& name);
+// The channel status's `video_codec_hw`: "nvdec" or "nvenc" when the video decoder or encoder
+// in use is NVIDIA's, "none" for a CPU codec, empty before one is open.
+std::string videoCodecHw(std::string const& decoder, std::string const& encoder);
 } // namespace srtgw

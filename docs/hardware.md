@@ -21,8 +21,11 @@ On an A4000 and an L4:
    SRT `latency_ms` + `sync_latency_ms` + codec delay. The dashboard RTT and
    the frame-sync repeat/drop counters should stay flat while the pattern runs.
 
-`mxl_srt_gateway_nvdec_sessions`, `mxl_srt_gateway_nvenc_sessions` and
-`mxl_srt_gateway_gpu_memory_bytes` come from `nvidia-smi` when it is on `PATH`.
+GPU memory and NVENC/NVDEC load come from the node's DCGM exporter. The
+gateway's own GPU gauges (`nvdec_sessions`, `nvenc_sessions`,
+`gpu_memory_bytes`) were removed in 1.4.2: each read ran `nvidia-smi`. A
+channel's `video_codec_hw` and its `codec_opened` log line say whether NVDEC
+or NVENC codes its video.
 
 4:2:2 or 10-bit sources that NVDEC refuses are decoded on the CPU and the
 channel status reports the CPU decoder name. Interlaced HEVC is rejected at

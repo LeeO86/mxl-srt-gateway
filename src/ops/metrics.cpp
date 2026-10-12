@@ -91,9 +91,19 @@ std::string renderMetrics(ProcessMetrics const& metrics)
     }
     out << "mxl_srt_gateway_process_resident_bytes " << metrics.residentBytes << "\n";
     out << "mxl_srt_gateway_process_cpu_seconds " << metrics.cpuSeconds << "\n";
-    out << "mxl_srt_gateway_nvenc_sessions " << metrics.nvencSessions << "\n";
-    out << "mxl_srt_gateway_nvdec_sessions " << metrics.nvdecSessions << "\n";
-    out << "mxl_srt_gateway_gpu_memory_bytes " << metrics.gpuMemoryBytes << "\n";
     return out.str();
+}
+
+std::string videoCodecHw(std::string const& decoder, std::string const& encoder)
+{
+    if (decoder.ends_with("_cuvid"))
+    {
+        return "nvdec";
+    }
+    if (encoder.ends_with("_nvenc"))
+    {
+        return "nvenc";
+    }
+    return decoder.empty() && encoder.empty() ? "" : "none";
 }
 } // namespace srtgw

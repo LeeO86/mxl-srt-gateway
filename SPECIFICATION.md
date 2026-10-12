@@ -358,14 +358,15 @@ corporate firewall. Therefore:
 - **Dashboard:** per channel: direction, state (`idle`, `connecting`, `waiting`,
   `no_signal`, `running`, `error`), SRT peer, SRT statistics (RTT, packet loss,
   retransmits, dropped, buffer, bitrate), detected source format, target format,
-  decoder/encoder in use, frame-sync repeats/drops, audio drift, audio meters
+  decoder/encoder in use (`video_codec_hw`: `nvdec`, `nvenc` or `none`),
+  frame-sync repeats/drops, audio drift, audio meters
   (WebSocket), JPEG thumbnail of the current frame (low rate).
 - **Channels:** create/edit/delete ingest and egress channels with all settings
   above; changes apply per channel at runtime (only that channel restarts).
 - **Audio:** the matrix (ingest) or the tracks (egress) per channel.
 - **NMOS & MXL:** node info, registration, senders/receivers with active
   parameters, the MXL domains and flows on the host (egress source picker).
-- **Status:** health, versions, process and GPU, per-channel counters.
+- **Status:** health, versions, process, per-channel counters.
 - **Settings:** effective configuration with origins, import/export, `KEY=value` export.
 - REST under `/api/v1/…` (channels CRUD, status, statistics, config, info,
   domains), WebSocket `/api/v1/events`; `/livez`, `/readyz`, `/statusz`,
@@ -442,7 +443,13 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 ingest from a packet's arrival to its picture, egress from a frame into the
 encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
-plus process and GPU (`nvenc_sessions`, `nvdec_sessions`, GPU memory).
+plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+which adds load on the GPU's management processor (GSP); the node's DCGM
+exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
+Each open of a video decoder or encoder logs `codec_opened` with `channel`,
+`direction`, `codec`, `hw` (`nvdec`, `nvenc`, `none`) and `fallback` (why the
+NVIDIA codec was wanted but not used: `no_nvdec_decoder`, `no_nvenc_encoder`,
+`cuda_unavailable`, `open_failed`; empty otherwise).
 Grafana dashboard in `deploy/grafana/`.
 
 ---

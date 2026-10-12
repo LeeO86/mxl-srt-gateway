@@ -6,7 +6,6 @@
 #include "util/net.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -26,32 +25,6 @@ double readRss()
     double pages = 0;
     in >> pages >> pages;
     return pages * 4096.0;
-}
-
-void readGpu(int* nvenc, int* nvdec, double* memory)
-{
-    *nvenc = 0;
-    *nvdec = 0;
-    *memory = 0;
-    FILE* pipe = popen("nvidia-smi --query-gpu=memory.used,encoder.stats.sessionCount,decoder.stats.sessionCount --format=csv,noheader,nounits 2>/dev/null", "r");
-    if (pipe == nullptr)
-    {
-        return;
-    }
-    char line[256] = {};
-    if (std::fgets(line, sizeof(line), pipe) != nullptr)
-    {
-        double mem = 0;
-        int enc = 0;
-        int dec = 0;
-        if (std::sscanf(line, "%lf, %d, %d", &mem, &enc, &dec) >= 1)
-        {
-            *memory = mem * 1024.0 * 1024.0;
-            *nvenc = enc;
-            *nvdec = dec;
-        }
-    }
-    pclose(pipe);
 }
 } // namespace
 
@@ -459,7 +432,7 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << "\",\"enabled\":" << (channel.enabled ? "true" : "false") << ",\"state\":\"" << status.state << "\",\"error\":\"" << jsonEscape(status.error)
         << "\",\"peer\":\"" << jsonEscape(status.peer) << "\",\"source_format\":\"" << jsonEscape(status.sourceFormat) << "\",\"target_format\":\""
         << jsonEscape(status.targetFormat.empty() ? channel.target.label() : status.targetFormat) << "\",\"decoder\":\"" << jsonEscape(status.decoder)
-        << "\",\"encoder\":\"" << jsonEscape(status.encoder) << "\",\"frames\":" << status.frames << ",\"repeats\":" << status.repeats << ",\"drops\":" << status.drops
+        << "\",\"encoder\":\"" << jsonEscape(status.encoder) << "\",\"video_codec_hw\":\"" << videoCodecHw(status.decoder, status.encoder) << "\",\"frames\":" << status.frames << ",\"repeats\":" << status.repeats << ",\"drops\":" << status.drops
         << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
         << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
@@ -532,19 +505,6 @@ ProcessMetrics ChannelManager::metrics() const
 {
     ProcessMetrics metrics;
     metrics.residentBytes = readRss();
-    static int nvenc = 0;
-    static int nvdec = 0;
-    static double memory = 0;
-    static std::int64_t last = 0;
-    auto const now = monoNowMs();
-    if (now - last > 2000)
-    {
-        readGpu(&nvenc, &nvdec, &memory);
-        last = now;
-    }
-    metrics.nvencSessions = nvenc;
-    metrics.nvdecSessions = nvdec;
-    metrics.gpuMemoryBytes = memory;
     std::lock_guard const lock{mu_};
     for (auto const& slot : slots_)
     {
