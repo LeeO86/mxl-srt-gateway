@@ -1133,12 +1133,23 @@ TEST_CASE("metrics render the channel set")
     channel.encodeLatencyBuckets = {1, 3, 0, 0, 0, 0, 0, 0};
     channel.codecDelayMs = 12.5;
     metrics.channels.push_back(channel);
-    metrics.nvdecSessions = 1;
     auto const text = renderMetrics(metrics);
     CHECK(text.find("mxl_srt_gateway_channel_state{channel=\"in1\"} 4") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_framesync_repeats_total{channel=\"in1\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_info{channel=\"in1\"") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_delay_ms{channel=\"in1\"} 12.5") != std::string::npos);
-    CHECK(text.find("mxl_srt_gateway_nvdec_sessions 1") != std::string::npos);
+    // No GPU gauges: reading them ran nvidia-smi (1.4.2).
+    CHECK(text.find("nvdec_sessions") == std::string::npos);
+    CHECK(text.find("nvenc_sessions") == std::string::npos);
+    CHECK(text.find("gpu_memory_bytes") == std::string::npos);
     CHECK(stateCode("no_signal") == 3);
+}
+
+TEST_CASE("the channel status names the video codec's hardware")
+{
+    CHECK(videoCodecHw("h264_cuvid", "") == "nvdec");
+    CHECK(videoCodecHw("h264-cpu", "") == "none");
+    CHECK(videoCodecHw("", "hevc_nvenc") == "nvenc");
+    CHECK(videoCodecHw("", "libx264") == "none");
+    CHECK(videoCodecHw("", "").empty());
 }

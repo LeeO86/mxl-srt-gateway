@@ -297,6 +297,20 @@ both.
     a52dec) puts all four at the same time, faad 22 ms earlier, and the
     gateway's ingest (libavcodec frames by their packet PTS) +6 ms. The CLI's
     figure is its own; no codec compensation is added.
+14. **No GPU gauges (1.4.2).** `/metrics` had `nvenc_sessions`,
+    `nvdec_sessions` and `gpu_memory_bytes`, read with
+    `popen("nvidia-smi --query-gpu=…")` at most every 2 s on a scrape. Each
+    run starts NVML from scratch and sends GSP RPCs. The platform's host-03
+    RTX A4000 hung twice (Xid 119 GSP RPC timeouts, then Xid 154, GPU reset
+    required), both times with an `nvidia-smi` among the first RPCs to time
+    out. The gauges are removed (the platform decided; its DCGM exporter has
+    GPU memory, NVENC/NVDEC utilisation, temperature and clocks per node), and
+    nothing else in the repository runs `nvidia-smi` or NVML. Instead each
+    open of a video decoder or encoder logs `codec_opened` (`channel`,
+    `direction`, `codec`, `hw`, `fallback`), replacing the ingest's
+    `nvdec_unavailable` and `nvdec_fallback`, and the channel status has
+    `video_codec_hw`, from the decoder or encoder name (`_cuvid` → `nvdec`,
+    `_nvenc` → `nvenc`, else `none`; empty before the codec opens).
 
 ## MXL calls that matter
 
@@ -338,11 +352,12 @@ NMOS transport in v1.
 `./build/unit-tests` covers the decision table, synchroniser, cadence, matrix,
 config precedence, access control, v210 stride, audio slices that wrap the
 ring, the egress audio sample formats, the PTS mapping (window minimum,
-drift, steps), the audio gap fill, metrics text, the widget routes (list, CORS, CSP, 400/404/405) and
+drift, steps), the audio gap fill, metrics text (no GPU gauges), `video_codec_hw`, the widget routes (list, CORS, CSP, 400/404/405) and
 `WIDGET_FRAME_ANCESTORS`.
 
 `tests/integration/ci.sh` pushes FFmpeg SRT into an ingest listener, checks
-format and frame count, pulls the egress listener and checks H.264 720p, checks
+format, frame count and `video_codec_hw`, pulls the egress listener and checks
+H.264 720p and both `codec_opened` lines, checks
 caller mode, checks that an `internet` listener logs a stream-id reject
 without returning the passphrase, and fetches the widget routes through the
 HTTP server. Set `SRTGW_TEST_SECONDS=60` for the long TAI

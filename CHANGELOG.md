@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.2
+
+### Removed
+
+- GPU gauges `mxl_srt_gateway_nvenc_sessions`, `mxl_srt_gateway_nvdec_sessions` and `mxl_srt_gateway_gpu_memory_bytes`, with their rows in the UI's Status tab and the Grafana panel "GPU sessions", because each read exec'd `nvidia-smi` (at most every 2 s, on a `/metrics` scrape), which starts NVML from scratch and adds GSP management load on a busy GPU. The platform's host-03 RTX A4000 hung twice with GSP RPC timeouts (Xid 119, then Xid 154), both times with an `nvidia-smi` among the first RPCs to time out. Use the node's DCGM exporter for GPU memory, NVENC/NVDEC utilisation, temperature and clocks. Nothing in the gateway runs `nvidia-smi` or NVML any more.
+
+### Added
+
+- Each open of a video decoder or encoder logs one info line, `codec_opened`, with `channel`, `direction`, `codec`, `hw` (`nvdec`, `nvenc` or `none`) and `fallback`: why the NVIDIA codec was wanted but the CPU codes the video (`no_nvdec_decoder`, `no_nvenc_encoder`, `cuda_unavailable`, `open_failed`), empty otherwise. It replaces the ingest's `nvdec_unavailable` and `nvdec_fallback` lines; the egress logged no codec before.
+- The channel status has `video_codec_hw`: `nvdec`, `nvenc` or `none`, empty until the codec opens.
+- The Compose and Kubernetes examples use the `1.4.2` image.
+
 ## 1.4.1
 
 ### Fixes

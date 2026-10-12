@@ -1,6 +1,6 @@
 <script setup>
-// Status (SPECIFICATION.md §7, §9): health probes, versions, the process and GPU numbers of
-// /metrics, and per channel its state, SRT statistics, frame sync, codec and alarms.
+// Status (SPECIFICATION.md §7, §9): health probes, versions, the process numbers of /metrics,
+// and per channel its state, SRT statistics, frame sync, codec and alarms.
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import Pill from "./Pill.vue";
 import { STATE_TEXT, api, fmtBitrate, fmtBytes, num, parseMetrics, probe, stateKind } from "../api.js";
@@ -77,16 +77,10 @@ const dir = (id) => live.channels.find((c) => c.id === id)?.direction || "";
       </dl>
     </div>
     <div class="panel">
-      <h3>Process and GPU</h3>
+      <h3>Process</h3>
       <dl class="kv">
         <dt>Memory</dt>
         <dd>{{ fmtBytes(proc.process_resident_bytes) }}</dd>
-        <dt>NVDEC sessions</dt>
-        <dd>{{ num(proc.nvdec_sessions) }}</dd>
-        <dt>NVENC sessions</dt>
-        <dd>{{ num(proc.nvenc_sessions) }}</dd>
-        <dt>GPU memory</dt>
-        <dd>{{ fmtBytes(proc.gpu_memory_bytes) }}</dd>
         <dt>Config file</dt>
         <dd><code>{{ info.config_file || "none (SRTGW_CONFIG_FILE unset)" }}</code></dd>
       </dl>

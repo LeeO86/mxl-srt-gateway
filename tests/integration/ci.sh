@@ -65,6 +65,7 @@ need = int(os.environ.get("SRTGW_TEST_SECONDS", "8"))
 assert s["source_format"] == "720p25", s
 assert s["target_format"] == "720p25", s
 assert s["decoder"].startswith("h264"), s
+assert s["video_codec_hw"] == "none", s
 assert s["frames"] >= max(10, need * 10), s
 print("ingest", s["state"], s["frames"], s["decoder"])
 PY
@@ -92,6 +93,9 @@ ffmpeg -hide_banner -loglevel info -i "srt://127.0.0.1:19002?mode=caller&transty
 grep -q "1280x720" "$WORK/recv.log"
 grep -q "h264" "$WORK/recv.log"
 echo "egress stream identified"
+grep -q '"event":"codec_opened","channel":"ingest-listen","direction":"ingest","codec":"h264-cpu","hw":"none"' "$WORK/gw.log"
+grep -q '"event":"codec_opened","channel":"egress-listen","direction":"egress","codec":"libx264","hw":"none"' "$WORK/gw.log"
+echo "codecs logged"
 
 # Caller ingest: gateway dials ffmpeg's listener.
 curl -fsS -X POST http://127.0.0.1:18120/api/v1/channels -H 'content-type: application/json' -d '{

@@ -890,6 +890,8 @@ void IngestPipeline::runIo()
         std::string decoderName;
         bool hardware = false;
         AVCodec const* videoCodec = findVideoDecoder(fmt->streams[videoStream]->codecpar->codec_id, decoderPref_, &decoderName, &hardware);
+        // Why NVDEC was wanted (DECODER auto or nvdec) but the CPU decodes.
+        std::string fallback = decoderPref_ != "cpu" && !hardware ? "no_nvdec_decoder" : "";
         AVCodecContext* videoCtx = nullptr;
         if (hardware)
         {
@@ -905,14 +907,14 @@ void IngestPipeline::runIo()
                 hardware = false;
                 videoCodec = avcodec_find_decoder(fmt->streams[videoStream]->codecpar->codec_id);
                 decoderName = std::string(avcodec_get_name(fmt->streams[videoStream]->codecpar->codec_id)) + "-cpu";
-                log::info("nvdec_unavailable", {{"channel", config_.id}, {"fallback", "cpu"}});
+                fallback = "cuda_unavailable";
             }
         }
         if (videoCodec == nullptr || !openDecoder(&videoCtx, videoCodec, fmt->streams[videoStream]->codecpar, hardware ? hw : nullptr))
         {
             if (hardware)
             {
-                log::info("nvdec_fallback", {{"channel", config_.id}, {"reason", "open_failed"}});
+                fallback = "open_failed";
                 hardware = false;
                 videoCodec = avcodec_find_decoder(fmt->streams[videoStream]->codecpar->codec_id);
                 decoderName = std::string(avcodec_get_name(fmt->streams[videoStream]->codecpar->codec_id)) + "-cpu";
@@ -935,6 +937,8 @@ void IngestPipeline::runIo()
             publish(failed);
             return;
         }
+        log::info("codec_opened",
+            {{"channel", config_.id}, {"direction", "ingest"}, {"codec", decoderName}, {"hw", hardware ? "nvdec" : "none"}, {"fallback", fallback}});
         {
             std::lock_guard const lock{shared_->mediaMu};
             shared_->decoder = decoderName;
@@ -1893,6 +1897,8 @@ void EgressPipeline::run()
             return true;
         }
         std::string name;
+        // Why NVENC was wanted (ENCODER auto) but the CPU encodes.
+        std::string fallback;
         bool nvenc = encoderPref_ != "cpu";
         if (nvenc)
         {
@@ -1906,6 +1912,7 @@ void EgressPipeline::run()
                 *error = "NVENC is not available";
                 return false;
             }
+            fallback = nvenc ? "no_nvenc_encoder" : "";
             name = config_.egress.codec == "hevc" ? "libx265" : "libx264";
             codec = avcodec_find_encoder_by_name(name.c_str());
             nvenc = false;
@@ -1978,6 +1985,7 @@ void EgressPipeline::run()
                 {
                     encoderPref_ = "cpu";
                     nvenc = false;
+                    fallback = "open_failed";
                     name = config_.egress.codec == "hevc" ? "libx265" : "libx264";
                     codec = avcodec_find_encoder_by_name(name.c_str());
                     if (codec == nullptr)
@@ -2020,6 +2028,7 @@ void EgressPipeline::run()
                 }
             }
         status_.encoder = name;
+        log::info("codec_opened", {{"channel", config_.id}, {"direction", "egress"}, {"codec", name}, {"hw", nvenc ? "nvenc" : "none"}, {"fallback", fallback}});
         for (auto const& track : config_.egress.audioTracks)
         {
             std::string audioName = track.codec == "aac" ? "aac" : track.codec == "mp2" ? "mp2" : track.codec == "ac3" ? "ac3" : track.codec == "opus" ? "libopus" : "s302m";

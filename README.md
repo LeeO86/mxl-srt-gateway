@@ -94,7 +94,15 @@ the secret; they are never logged and are omitted from the API unless
 
 `/readyz` is 200 only when channels are up and, if `NMOS_REGISTRY_ADDRESS` is
 set, the Query API lists this node. `/livez` is 200 while the process is up.
-`/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix.
+`/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix: per channel
+state, SRT statistics, frames, frame sync, audio, decode and encode rates,
+`codec_delay_ms`, `encode_latency_seconds`, `codec_info`, `failover_active`;
+per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
+DCGM exporter has GPU memory and NVENC/NVDEC load. Whether a channel's video
+runs on NVDEC or NVENC is its status's `video_codec_hw` (`nvdec`, `nvenc`,
+`none`) and the `codec_opened` log line of each decoder or encoder open, with
+`fallback` saying why the CPU codec took over (`no_nvdec_decoder`,
+`no_nvenc_encoder`, `cuda_unavailable`, `open_failed`).
 
 REST, all under `/api/v1`: `GET /status`, `GET /info`, `GET /nmos`,
 `GET /domains`, `GET|PUT /config`, `GET /config/export` (`?format=env`,
