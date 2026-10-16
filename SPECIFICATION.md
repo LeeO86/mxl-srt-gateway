@@ -180,6 +180,9 @@ raster (1920×1080, 1280×720, 3840×2160), scan (progressive/interlaced), rate
 (23.98, 24, 25, 29.97, 30, 50, 59.94, 60 frames or 1080i at 25 and 29.97 frames),
 colour BT.709 (v1; SDR only). The output is always the target, whatever arrives.
 
+Interlaced video and its ANC follow the shared MXL interlaced convention:
+https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
+
 | Source → Target | Processing |
 | --- | --- |
 | interlaced → progressive, same field rate (e.g. 1080i50 → 1080p50) | field-rate deinterlace (bwdif, one frame per field) |
