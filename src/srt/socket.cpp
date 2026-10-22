@@ -202,6 +202,9 @@ bool SrtLink::openSocket(bool listener)
     if (listener)
     {
         listenFd_ = fd;
+        listenEid_ = srt_epoll_create();
+        int const events = SRT_EPOLL_IN;
+        srt_epoll_add_usock(listenEid_, listenFd_, &events);
     }
     else
     {
@@ -253,6 +256,8 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         if (!already)
         {
             log::error("srt_bind_failed", {{"channel", channelId_}, {"error", message}, {"code", std::to_string(code)}, {"port", std::to_string(config_.localPort)}});
+            srt_epoll_release(listenEid_);
+            listenEid_ = -1;
             srt_close(listenFd_);
             listenFd_ = -1;
             return false;
@@ -262,9 +267,7 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
     {
         // srt_listen on an already listening socket returns an error; ignore that case.
     }
-    int const eid = srt_epoll_create();
-    int const events = SRT_EPOLL_IN;
-    srt_epoll_add_usock(eid, listenFd_, &events);
+    int const eid = listenEid_;
     while (!stop.load())
     {
         SRTSOCKET ready[4] = {};
@@ -310,11 +313,9 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         stats_.connected = true;
         stats_.peer = peerText;
         stats_.streamId = input.streamId;
-        srt_epoll_release(eid);
         log::info("srt_connected", {{"channel", channelId_}, {"peer", stats_.peer}, {"mode", config_.mode}});
         return true;
     }
-    srt_epoll_release(eid);
     return false;
 }
 
@@ -403,6 +404,8 @@ void SrtLink::closeAll()
     }
     if (listen >= 0)
     {
+        srt_epoll_release(listenEid_);
+        listenEid_ = -1;
         srt_close(listen);
     }
 }
@@ -474,14 +477,10 @@ void SrtLink::rejectPending(AttemptLimiter& limiter)
     {
         return;
     }
-    int const eid = srt_epoll_create();
-    int const events = SRT_EPOLL_IN;
-    srt_epoll_add_usock(eid, listenFd_, &events);
     SRTSOCKET ready[2] = {};
     int readyCount = 2;
     int writeCount = 0;
-    int const waited = srt_epoll_wait(eid, ready, &readyCount, nullptr, &writeCount, 0, nullptr, nullptr, nullptr, nullptr);
-    srt_epoll_release(eid);
+    int const waited = srt_epoll_wait(listenEid_, ready, &readyCount, nullptr, &writeCount, 0, nullptr, nullptr, nullptr, nullptr);
     if (waited == SRT_ERROR || readyCount <= 0)
     {
         return;
@@ -497,6 +496,19 @@ void SrtLink::rejectPending(AttemptLimiter& limiter)
     limiter.record(ip, monoNowMs());
     logReject(peerOf(extra).empty() ? ip : peerOf(extra), "second_peer");
     srt_close(extra);
+}
+
+bool SrtLink::hasPendingCaller() const
+{
+    if (listenFd_ < 0 || dataFd_ < 0)
+    {
+        return false;
+    }
+    SRTSOCKET ready[2] = {};
+    int readyCount = 2;
+    int writeCount = 0;
+    int const waited = srt_epoll_wait(listenEid_, ready, &readyCount, nullptr, &writeCount, 0, nullptr, nullptr, nullptr, nullptr);
+    return waited != SRT_ERROR && readyCount > 0;
 }
 
 SrtStats SrtLink::stats() const

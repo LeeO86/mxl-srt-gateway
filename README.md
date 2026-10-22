@@ -38,6 +38,7 @@ cmake --build build -j"$(nproc)"
 ./build/unit-tests
 SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 tests/integration/reopen.sh ./build/mxl-srt-gateway
+tests/integration/reconnect.sh ./build/mxl-srt-gateway
 ```
 
 Pins, recorded in `IMPLEMENTATION_PLAN.md`:
@@ -217,5 +218,5 @@ lab host those 8 encoders take about 0.9 of a core in the egress loop. Set
 ## Layout
 
 `src/` is the gateway, `web/` the Vue 3 UI embedded in the binary, `tests/`
-doctest plus `tests/integration/ci.sh` and `reopen.sh`, `deploy/` the Kubernetes manifests and
+doctest plus `tests/integration/ci.sh`, `reopen.sh` and `reconnect.sh`, `deploy/` the Kubernetes manifests and
 Grafana dashboard, `docker/` the image and Compose examples.

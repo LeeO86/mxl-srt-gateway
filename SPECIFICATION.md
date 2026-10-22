@@ -153,8 +153,16 @@ runtime (only that channel reconnects). Rendezvous mode is optional.
   passphrase and key length (AES-128/192/256), `streamid` (caller: sent; listener:
   accepted values configurable), max bandwidth / overhead, payload size 1316.
 - Listener accepts one connection per channel; a second caller is rejected and
-  logged.
+  logged. When the connected peer has sent nothing for 1 s and another caller
+  waits, the new caller takes over (`srt_peer_replaced`): a sender killed without
+  an SRT shutdown is only noticed after SRT's 5 s idle timeout.
 - Reconnect: caller retries with backoff (1 s → 10 s); listener keeps listening.
+  Every new connection is a new stream for the ingest: the bytes left from the
+  old one are dropped and the demuxer and decoders start again
+  (`srt_stream_restart`), so new PIDs, a new PTS/PCR base or another format are
+  probed from scratch. A stream that cannot be opened is retried and logged
+  (`ingest_probe_failed`, at most every 5 s). A lost link logs `srt_disconnected`
+  and its SRT statistics (rate, RTT, buffer) read 0 until it is back.
 - Optional backup input: a second SRT source (listener port or caller URL);
   automatic switch on loss of the main input after `failover_ms`, switch back
   after `failback_ms` of stable main signal (or manual). SRT socket groups are not
@@ -516,7 +524,10 @@ Grafana dashboard in `deploy/grafana/`.
      deinterlaces correctly (pixel checks), audio cadence exact.
   2. Source at 59.94 into a 50p target: repeats/drops within expected counts, no
      MXL gaps.
-  3. Kill the SRT source: MXL output continues with hold → slate; reconnect resumes.
+  3. Kill the SRT source: MXL output continues with hold → slate; reconnect resumes
+     (`tests/integration/reconnect.sh`: caller and listener ingest, the source
+     restarts with a new PTS base, other PIDs, HEVC, another format, and from
+     another source port; video decodes and audio is back within a few seconds).
   4. Egress from an MXL test flow to SRT, received by FFmpeg/`srt-live-transmit`;
      verify codec, resolution, bitrate, PCR interval.
   5. Multichannel: a TS with 8 stereo AAC PIDs and one with two 8-channel 302M

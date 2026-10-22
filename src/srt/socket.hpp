@@ -42,6 +42,8 @@ public:
     int recv(std::uint8_t* data, int size);
     int send(std::uint8_t const* data, int size);
     void rejectPending(AttemptLimiter& limiter);
+    // Listener with a connected peer: another caller is waiting to be accepted.
+    [[nodiscard]] bool hasPendingCaller() const;
     [[nodiscard]] SrtStats stats() const;
     [[nodiscard]] bool connected() const;
 
@@ -54,6 +56,10 @@ private:
     SrtEndpointConfig config_;
     std::string channelId_;
     int listenFd_ = -1;
+    // The listener's epoll, for the socket's life: SRT signals a queued caller only to the epolls
+    // that hold the listener when it arrives, so an epoll made later never saw a caller that came
+    // while the last connection was still up, and that caller was never accepted.
+    int listenEid_ = -1;
     int dataFd_ = -1;
     mutable std::mutex mutex_;
     SrtStats stats_;

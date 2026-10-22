@@ -205,6 +205,8 @@ struct BytePipe
     bool up = false;
     std::string peer;
     SrtStats stats;
+    // Counts SRT connections: a new one is a new stream (new PIDs, timestamps, format).
+    std::uint64_t generation = 0;
 
     int readSome(std::uint8_t* dst, int size, std::atomic<bool> const& stop)
     {
@@ -547,6 +549,11 @@ struct IngestPipeline::Shared
 {
     BytePipe mainPipe;
     BytePipe backupPipe;
+    // The pipe the demuxer reads and that pipe's connection (IO thread only).
+    BytePipe* readingPipe = nullptr;
+    std::uint64_t readingGeneration = 0;
+    // Set when that link reconnected: reads end (EOF) until runIo opens a new demuxer.
+    bool restartDemux = false;
     int active = 0;
     std::int64_t mainStableSince = 0;
     std::mutex mediaMu;
@@ -686,12 +693,25 @@ void IngestPipeline::runLink(bool backup)
         backoffMs = 1000;
         auto& pipe = backup ? shared_->backupPipe : shared_->mainPipe;
         {
+            // A new connection starts a new stream: the bytes left from the last one go, and the
+            // demuxer starts again (readActive).
             std::lock_guard const lock{pipe.mu};
+            pipe.bytes.clear();
+            ++pipe.generation;
             pipe.up = true;
             pipe.peer = link.stats().peer;
         }
+        auto lastData = std::chrono::steady_clock::now();
         while (!stop_.load() && link.connected())
         {
+            // A listener whose peer sent nothing for 1 s while another caller waits: the peer is
+            // gone (a sender killed without a shutdown is only noticed after SRT's 5 s idle
+            // timeout), so the new caller takes over instead of being turned away.
+            if (std::chrono::steady_clock::now() - lastData >= std::chrono::seconds(1) && link.hasPendingCaller())
+            {
+                log::warn("srt_peer_replaced", {{"channel", config_.id}, {"link", backup ? "backup" : "main"}, {"peer", link.stats().peer}});
+                break;
+            }
             if (!backup)
             {
                 link.rejectPending(limiter);
@@ -701,6 +721,7 @@ void IngestPipeline::runLink(bool backup)
             if (n > 0)
             {
                 appendPipe(pipe, buffer, n);
+                lastData = std::chrono::steady_clock::now();
             }
             else if (n < 0)
             {
@@ -712,8 +733,11 @@ void IngestPipeline::runLink(bool backup)
             pipe.peer = stats.peer;
             pipe.up = true;
         }
+        log::warn("srt_disconnected", {{"channel", config_.id}, {"link", backup ? "backup" : "main"}, {"peer", pipe.peer}});
         std::lock_guard const lock{pipe.mu};
         pipe.up = false;
+        // No stale rate or RTT while the link is down.
+        pipe.stats = SrtStats{};
         link.closeData();
     }
     link.closeAll();
@@ -723,66 +747,104 @@ int readActive(void* opaque, std::uint8_t* buf, int bufSize)
 {
     auto* self = static_cast<IngestPipeline*>(opaque);
     auto& shared = *self->shared_;
-    BytePipe* pipe = &shared.mainPipe;
-    if (self->config_.backup.enabled)
+    // Blocks until there are bytes. An AVERROR(EAGAIN) here stuck in FFmpeg's AVIOContext
+    // (error and eof_reached stay set, it never reads again): the demuxer then returned EAGAIN
+    // forever after any gap of 200 ms, also after a reconnect, and the ingest wrote no picture.
+    for (;;)
     {
-        auto const now = monoNowMs();
-        if (self->config_.backup.force == "backup")
+        BytePipe* pipe = &shared.mainPipe;
+        if (self->config_.backup.enabled)
         {
-            shared.active = 1;
-        }
-        else if (self->config_.backup.force == "main")
-        {
-            shared.active = 0;
-        }
-        else
-        {
-            bool const mainDead = shared.mainPipe.lastMs == 0 || now - shared.mainPipe.lastMs > self->config_.backup.failoverMs;
-            bool const backupLive = shared.backupPipe.lastMs != 0 && now - shared.backupPipe.lastMs < self->config_.backup.failoverMs;
-            if (shared.active == 0 && mainDead && backupLive)
+            auto const now = monoNowMs();
+            if (self->config_.backup.force == "backup")
             {
                 shared.active = 1;
-                shared.mainStableSince = 0;
-                log::warn("srt_failover", {{"channel", self->config_.id}, {"active", "backup"}});
             }
-            if (shared.active == 1)
+            else if (self->config_.backup.force == "main")
             {
-                bool const mainLive = shared.mainPipe.lastMs != 0 && now - shared.mainPipe.lastMs < 400;
-                if (mainLive)
+                shared.active = 0;
+            }
+            else
+            {
+                bool const mainDead = shared.mainPipe.lastMs == 0 || now - shared.mainPipe.lastMs > self->config_.backup.failoverMs;
+                bool const backupLive = shared.backupPipe.lastMs != 0 && now - shared.backupPipe.lastMs < self->config_.backup.failoverMs;
+                if (shared.active == 0 && mainDead && backupLive)
                 {
-                    if (shared.mainStableSince == 0)
-                    {
-                        shared.mainStableSince = now;
-                    }
-                    if (now - shared.mainStableSince >= self->config_.backup.failbackMs)
-                    {
-                        shared.active = 0;
-                        log::info("srt_failback", {{"channel", self->config_.id}});
-                    }
-                }
-                else
-                {
+                    shared.active = 1;
                     shared.mainStableSince = 0;
+                    log::warn("srt_failover", {{"channel", self->config_.id}, {"active", "backup"}});
+                }
+                if (shared.active == 1)
+                {
+                    bool const mainLive = shared.mainPipe.lastMs != 0 && now - shared.mainPipe.lastMs < 400;
+                    if (mainLive)
+                    {
+                        if (shared.mainStableSince == 0)
+                        {
+                            shared.mainStableSince = now;
+                        }
+                        if (now - shared.mainStableSince >= self->config_.backup.failbackMs)
+                        {
+                            shared.active = 0;
+                            log::info("srt_failback", {{"channel", self->config_.id}});
+                        }
+                    }
+                    else
+                    {
+                        shared.mainStableSince = 0;
+                    }
                 }
             }
+            pipe = shared.active == 1 ? &shared.backupPipe : &shared.mainPipe;
         }
-        pipe = shared.active == 1 ? &shared.backupPipe : &shared.mainPipe;
+        if (self->stop_.load())
+        {
+            return AVERROR_EXIT;
+        }
+        if (shared.restartDemux)
+        {
+            return AVERROR_EOF;
+        }
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard const lock{pipe->mu};
+            generation = pipe->generation;
+        }
+        if (pipe != shared.readingPipe)
+        {
+            // First read, or a failover/failback: the demuxer goes on with the other link's stream.
+            shared.readingPipe = pipe;
+            shared.readingGeneration = generation;
+        }
+        else if (generation != shared.readingGeneration)
+        {
+            // The link reconnected: end this demuxer, so that the stream is probed and decoded
+            // from scratch (its PIDs, timestamps and format may all be new).
+            log::info("srt_stream_restart", {{"channel", self->config_.id}, {"link", pipe == &shared.backupPipe ? "backup" : "main"}});
+            shared.restartDemux = true;
+            return AVERROR_EOF;
+        }
+        int const n = pipe->readSome(buf, bufSize, self->stop_);
+        if (n > 0)
+        {
+            return n;
+        }
     }
-    if (self->stop_.load())
-    {
-        return AVERROR_EXIT;
-    }
-    int const n = pipe->readSome(buf, bufSize, self->stop_);
-    if (n == 0)
-    {
-        return AVERROR(EAGAIN);
-    }
-    return n;
 }
 
 void IngestPipeline::runIo()
 {
     ffmpegOnce();
+    // Why the stream could not be opened, at most every 5 s; the open is retried.
+    std::int64_t lastProbeLog = 0;
+    auto const probeFailed = [&](std::string const& reason) {
+        auto const now = monoNowMs();
+        if (lastProbeLog == 0 || now - lastProbeLog >= 5000)
+        {
+            lastProbeLog = now;
+            log::warn("ingest_probe_failed", {{"channel", config_.id}, {"reason", reason}});
+        }
+    };
     while (!stop_.load())
     {
         AVFormatContext* fmt = avformat_alloc_context();
@@ -799,8 +861,14 @@ void IngestPipeline::runIo()
         fmt->max_analyze_duration = 800000;
         fmt->interrupt_callback.callback = [](void* opaque) { return static_cast<std::atomic<bool>*>(opaque)->load() ? 1 : 0; };
         fmt->interrupt_callback.opaque = &stop_;
-        if (avformat_open_input(&fmt, nullptr, nullptr, nullptr) < 0)
+        shared_->readingPipe = nullptr;
+        shared_->restartDemux = false;
+        if (int const opened = avformat_open_input(&fmt, nullptr, nullptr, nullptr); opened < 0)
         {
+            if (!stop_.load() && opened != AVERROR_EOF)
+            {
+                probeFailed(ffError(opened));
+            }
             if (avio != nullptr)
             {
                 av_freep(&avio->buffer);
@@ -876,6 +944,7 @@ void IngestPipeline::runIo()
         }
         if (videoStream < 0)
         {
+            probeFailed("no video stream (" + std::to_string(fmt->nb_streams) + " streams)");
             avformat_close_input(&fmt);
             if (avio != nullptr)
             {
@@ -937,6 +1006,7 @@ void IngestPipeline::runIo()
             publish(failed);
             return;
         }
+        lastProbeLog = 0;
         log::info("codec_opened",
             {{"channel", config_.id}, {"direction", "ingest"}, {"codec", decoderName}, {"hw", hardware ? "nvdec" : "none"}, {"fallback", fallback}});
         {

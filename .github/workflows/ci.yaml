@@ -88,5 +88,8 @@ jobs:
       - name: Re-created flow
         run: tests/integration/reopen.sh ./build/mxl-srt-gateway
 
+      - name: SRT reconnect
+        run: tests/integration/reconnect.sh ./build/mxl-srt-gateway
+
       - name: Shutdown
         run: tests/integration/shutdown.sh ./build/mxl-srt-gateway
