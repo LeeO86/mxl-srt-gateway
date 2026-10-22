@@ -63,9 +63,19 @@ stop_writer() {
   echo "the flow was not deleted with its writer" >&2
   exit 1
 }
+# Activates (or with "false" deactivates) the route, as an IS-05 activation does.
 route() {
   curl -fsS -X POST "$API/channels/tx1/route" -H 'content-type: application/json' \
-    -d "{\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO\",\"audio_flow\":\"$AUDIO\"}" >/dev/null
+    -d "{\"video_active\":${1:-true},\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO\",\"audio_flow\":\"$AUDIO\"}" >/dev/null
+}
+# The readers are released: no file of the flows stays mapped in the gateway (up to 10 s).
+wait_released() {
+  for i in $(seq 1 40); do
+    grep -qE "($VIDEO|$AUDIO)\.mxl-flow/" "/proc/$GW/maps" || return 0
+    sleep 0.25
+  done
+  echo "$1: the gateway still maps the flow" >&2
+  exit 1
 }
 # Over 2 s the egress must pick a new source frame for nearly every output frame (a reader on
 # the deleted files repeats its last frame: every output frame is a repeat).
@@ -133,16 +143,22 @@ after="$(count '"event":"mxl_flow_open","channel":"tx1","reason":"activation"')"
 [ "$after" -gt "$before" ] || { echo "re-activation did not open the flow again" >&2; exit 1; }
 check_moving "re-activated"
 
+# IS-05 off, the writer restarts meanwhile, IS-05 on: the deactivation released the readers and
+# the activation opens the new flow.
+route false
+wait_released "deactivated route"
+stop_writer
+start_writer
+route
+sleep 1.5
+check_moving "deactivated and activated again"
+check_no_deleted "deactivated and activated again"
+check_audio "deactivated and activated again"
+
 # The channel stops, the writer restarts meanwhile, the channel starts again: the restarted
 # channel reads the new flow, not the reader the stopped one had open.
 curl -fsS -X PUT "$API/channels/tx1" -H 'content-type: application/json' -d '{"enabled": false}' >/dev/null
-# The stopped channel releases its readers: no file of the flows stays mapped (up to 10 s for the
-# channel to stop).
-for i in $(seq 1 40); do
-  grep -qE "($VIDEO|$AUDIO)\.mxl-flow/" "/proc/$GW/maps" || break
-  [ "$i" = 40 ] && { echo "the stopped channel still maps the flow" >&2; exit 1; }
-  sleep 0.25
-done
+wait_released "stopped channel"
 stop_writer
 start_writer
 check_no_deleted "stopped channel"

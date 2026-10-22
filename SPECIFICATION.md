@@ -526,7 +526,8 @@ Grafana dashboard in `deploy/grafana/`.
   8. A re-created flow (`tests/integration/reopen.sh`): the writer of the
      egress's flows restarts (same ids, new files); video moves again and audio
      is back within ~1 s, no mapping of the deleted files is left; a new
-     activation of the same flow and a channel restart open it fresh.
+     activation of the same flow, a deactivation (readers released) and activation
+     with the writer restarted in between, and a channel restart open it fresh.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency
