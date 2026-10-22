@@ -58,7 +58,7 @@ private:
     // it was rejected (logged with `rejectAs` or the check's reason, and counted).
     int acceptChecked(AttemptLimiter& limiter, char const* rejectAs, std::string* peerText, std::string* streamId);
     void applyOptions(int fd, bool caller) const;
-    void logReject(std::string const& peer, std::string const& reason) const;
+    void logReject(std::string const& peer, std::string const& reason, std::string const& check = "") const;
 
     SrtEndpointConfig config_;
     std::string channelId_;

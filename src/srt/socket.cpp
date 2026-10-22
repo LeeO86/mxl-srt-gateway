@@ -213,10 +213,16 @@ bool SrtLink::openSocket(bool listener)
     return true;
 }
 
-void SrtLink::logReject(std::string const& peer, std::string const& reason) const
+void SrtLink::logReject(std::string const& peer, std::string const& reason, std::string const& check) const
 {
     auto const colon = peer.find(':');
-    log::warn("srt_rejected", {{"channel", channelId_}, {"peer", colon == std::string::npos ? peer : peer.substr(0, colon)}, {"reason", reason}});
+    std::vector<log::Field> fields{{"channel", channelId_}, {"peer", colon == std::string::npos ? peer : peer.substr(0, colon)}, {"reason", reason}};
+    if (!check.empty())
+    {
+        // A second peer turned away by an access check: which one.
+        fields.push_back({"check", check});
+    }
+    log::warn("srt_rejected", fields);
 }
 
 bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
@@ -320,7 +326,7 @@ int SrtLink::acceptChecked(AttemptLimiter& limiter, char const* rejectAs, std::s
     if (!decision.accept)
     {
         limiter.record(ip, input.nowMs);
-        logReject(peerText->empty() ? ip : *peerText, rejectAs != nullptr ? rejectAs : decision.reason);
+        logReject(peerText->empty() ? ip : *peerText, rejectAs != nullptr ? rejectAs : decision.reason, rejectAs != nullptr ? decision.reason : "");
         srt_close(client);
         return -1;
     }
