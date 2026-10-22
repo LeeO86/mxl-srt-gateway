@@ -136,7 +136,13 @@ check_moving "re-activated"
 # The channel stops, the writer restarts meanwhile, the channel starts again: the restarted
 # channel reads the new flow, not the reader the stopped one had open.
 curl -fsS -X PUT "$API/channels/tx1" -H 'content-type: application/json' -d '{"enabled": false}' >/dev/null
-sleep 1.5
+# The stopped channel releases its readers: no file of the flows stays mapped (up to 10 s for the
+# channel to stop).
+for i in $(seq 1 40); do
+  grep -qE "($VIDEO|$AUDIO)\.mxl-flow/" "/proc/$GW/maps" || break
+  [ "$i" = 40 ] && { echo "the stopped channel still maps the flow" >&2; exit 1; }
+  sleep 0.25
+done
 stop_writer
 start_writer
 check_no_deleted "stopped channel"
