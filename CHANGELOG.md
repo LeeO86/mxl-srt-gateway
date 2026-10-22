@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (planned 1.4.3)
+## 1.4.3
 
 ### Fixes
 
@@ -23,6 +23,15 @@
 - Metric `mxl_srt_gateway_mxl_flow_reopens_total{channel,reason}`, `reason` `recreated` or `stalled`: egress readers opened again because their flow was re-created or its head stalled.
 - `tests/integration/reconnect.sh` (in CI). Log lines `srt_disconnected`, `srt_stream_restart`, `srt_peer_replaced`, `ingest_probe_failed`.
 - `tests/integration/reopen.sh` (in CI). `mxl-srt-flow-writer` takes the audio flow id as a fifth argument, writes on the grain clock, stops on SIGTERM (deleting its flows) and pauses or resumes on SIGUSR1. The test also checks that a steady flow is not reopened in 10 s and that a paused writer costs exactly one stall reopen.
+- A second peer turned away by an access check while it tried to take over a silent peer is logged as `srt_rejected` with `reason` `second_peer` and the failed check in `check` (`streamid`, `peer_allow`, `rate_limit`, `passphrase`).
+- Grafana panel "MXL flow reopens" (`increase(mxl_srt_gateway_mxl_flow_reopens_total[5m])` by channel and reason).
+- The Compose and Kubernetes examples use the `1.4.3` image.
+
+### Notes for the platform
+
+- A failback (and a failover) now always re-probes the stream and restarts the decoders: expect a short hold (the last picture, then the new link's first decoded frame, typically under a second) instead of the old link's stream continuing in the old demuxer.
+- A caller that fails the access checks while trying to replace a silent peer is rejected as `second_peer` (see `check` for which check); the peer stays.
+- New dashboard inputs: `mxl_srt_gateway_mxl_flow_reopens_total{channel,reason}` (`reason` `recreated` or `stalled`), and the log events `mxl_flow_open`, `mxl_flow_reopen`, `srt_disconnected`, `srt_stream_restart` (`reason` `reconnect` or `switch`), `srt_peer_replaced`, `ingest_probe_failed`. `srt_bitrate_bps`, `srt_rtt_ms` and `srt_buffer_ms` read 0 while an ingest link is down.
 
 ## 1.4.2
 

@@ -316,6 +316,18 @@ both.
     30 `nvidia-smi` execs in the two containers, 1.4.2 none and no other
     exec either. Sampling `ps` once a second did not catch 1.4.1's
     short-lived `nvidia-smi`; the trace did.
+15. **Re-created flows and SRT reconnects (1.4.3).** Egress: MXL shares one
+    reader per flow id within an instance, so the egress opens its flows in an
+    instance of its own per activation and channel start, closes its readers on
+    stop and deactivation, and every 250 ms compares each flow's `data` file
+    (device/inode) with the one it opened; a head standing still for 1 s
+    reopens both flows once (`mxl_flow_reopens_total{reason}`). Ingest: the
+    AVIO read callback never returns `AVERROR(EAGAIN)` (FFmpeg keeps that error
+    and never reads again); each new SRT connection, failover and failback
+    restarts the demuxer and decoders on fresh bytes; listeners keep one epoll
+    for the socket's life; an ingest listener lets a waiting caller replace a
+    peer silent for 1 s only after the access checks. Tests:
+    `tests/integration/reopen.sh` and `tests/integration/reconnect.sh`.
 
 ## MXL calls that matter
 
