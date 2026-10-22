@@ -205,6 +205,8 @@ struct BytePipe
     bool up = false;
     std::string peer;
     SrtStats stats;
+    // Counts SRT connections: a new one is a new stream (new PIDs, timestamps, format).
+    std::uint64_t generation = 0;
 
     int readSome(std::uint8_t* dst, int size, std::atomic<bool> const& stop)
     {
@@ -547,6 +549,11 @@ struct IngestPipeline::Shared
 {
     BytePipe mainPipe;
     BytePipe backupPipe;
+    // The pipe the demuxer reads and that pipe's connection (IO thread only).
+    BytePipe* readingPipe = nullptr;
+    std::uint64_t readingGeneration = 0;
+    // Set when that link reconnected: reads end (EOF) until runIo opens a new demuxer.
+    bool restartDemux = false;
     int active = 0;
     std::int64_t mainStableSince = 0;
     std::mutex mediaMu;
@@ -686,14 +693,36 @@ void IngestPipeline::runLink(bool backup)
         backoffMs = 1000;
         auto& pipe = backup ? shared_->backupPipe : shared_->mainPipe;
         {
+            // A new connection starts a new stream: the bytes left from the last one go, and the
+            // demuxer starts again (readActive).
             std::lock_guard const lock{pipe.mu};
+            pipe.bytes.clear();
+            ++pipe.generation;
             pipe.up = true;
             pipe.peer = link.stats().peer;
         }
+        auto lastData = std::chrono::steady_clock::now();
         while (!stop_.load() && link.connected())
         {
-            if (!backup)
+            auto const idle = std::chrono::steady_clock::now() - lastData;
+            if (idle >= std::chrono::seconds(1))
             {
+                // A listener whose peer sent nothing for 1 s while another caller waits: the peer
+                // is likely gone (a sender killed without a shutdown is only noticed after SRT's
+                // 5 s idle timeout). The caller takes over if it passes the access checks.
+                if (link.takeOverPending(limiter))
+                {
+                    std::lock_guard const lock{pipe.mu};
+                    pipe.bytes.clear();
+                    ++pipe.generation;
+                    pipe.peer = link.stats().peer;
+                    lastData = std::chrono::steady_clock::now();
+                }
+            }
+            else if (!backup && idle < std::chrono::milliseconds(200))
+            {
+                // A caller while the peer sends is a second peer. While the peer is silent the
+                // caller waits (a sender restarting fast is not counted against its rate limit).
                 link.rejectPending(limiter);
             }
             std::uint8_t buffer[1500];
@@ -701,6 +730,7 @@ void IngestPipeline::runLink(bool backup)
             if (n > 0)
             {
                 appendPipe(pipe, buffer, n);
+                lastData = std::chrono::steady_clock::now();
             }
             else if (n < 0)
             {
@@ -712,8 +742,11 @@ void IngestPipeline::runLink(bool backup)
             pipe.peer = stats.peer;
             pipe.up = true;
         }
+        log::warn("srt_disconnected", {{"channel", config_.id}, {"link", backup ? "backup" : "main"}, {"peer", pipe.peer}});
         std::lock_guard const lock{pipe.mu};
         pipe.up = false;
+        // No stale rate or RTT while the link is down.
+        pipe.stats = SrtStats{};
         link.closeData();
     }
     link.closeAll();
@@ -723,66 +756,122 @@ int readActive(void* opaque, std::uint8_t* buf, int bufSize)
 {
     auto* self = static_cast<IngestPipeline*>(opaque);
     auto& shared = *self->shared_;
-    BytePipe* pipe = &shared.mainPipe;
-    if (self->config_.backup.enabled)
+    // Blocks until there are bytes. An AVERROR(EAGAIN) here stuck in FFmpeg's AVIOContext
+    // (error and eof_reached stay set, it never reads again): the demuxer then returned EAGAIN
+    // forever after any gap of 200 ms, also after a reconnect, and the ingest wrote no picture.
+    for (;;)
     {
-        auto const now = monoNowMs();
-        if (self->config_.backup.force == "backup")
+        BytePipe* pipe = &shared.mainPipe;
+        if (self->config_.backup.enabled)
         {
-            shared.active = 1;
-        }
-        else if (self->config_.backup.force == "main")
-        {
-            shared.active = 0;
-        }
-        else
-        {
-            bool const mainDead = shared.mainPipe.lastMs == 0 || now - shared.mainPipe.lastMs > self->config_.backup.failoverMs;
-            bool const backupLive = shared.backupPipe.lastMs != 0 && now - shared.backupPipe.lastMs < self->config_.backup.failoverMs;
-            if (shared.active == 0 && mainDead && backupLive)
+            auto const now = monoNowMs();
+            if (self->config_.backup.force == "backup")
             {
                 shared.active = 1;
-                shared.mainStableSince = 0;
-                log::warn("srt_failover", {{"channel", self->config_.id}, {"active", "backup"}});
             }
-            if (shared.active == 1)
+            else if (self->config_.backup.force == "main")
             {
-                bool const mainLive = shared.mainPipe.lastMs != 0 && now - shared.mainPipe.lastMs < 400;
-                if (mainLive)
+                shared.active = 0;
+            }
+            else
+            {
+                bool const mainDead = shared.mainPipe.lastMs == 0 || now - shared.mainPipe.lastMs > self->config_.backup.failoverMs;
+                bool const backupLive = shared.backupPipe.lastMs != 0 && now - shared.backupPipe.lastMs < self->config_.backup.failoverMs;
+                if (shared.active == 0 && mainDead && backupLive)
                 {
-                    if (shared.mainStableSince == 0)
-                    {
-                        shared.mainStableSince = now;
-                    }
-                    if (now - shared.mainStableSince >= self->config_.backup.failbackMs)
-                    {
-                        shared.active = 0;
-                        log::info("srt_failback", {{"channel", self->config_.id}});
-                    }
-                }
-                else
-                {
+                    shared.active = 1;
                     shared.mainStableSince = 0;
+                    log::warn("srt_failover", {{"channel", self->config_.id}, {"active", "backup"}});
+                }
+                if (shared.active == 1)
+                {
+                    bool const mainLive = shared.mainPipe.lastMs != 0 && now - shared.mainPipe.lastMs < 400;
+                    if (mainLive)
+                    {
+                        if (shared.mainStableSince == 0)
+                        {
+                            shared.mainStableSince = now;
+                        }
+                        if (now - shared.mainStableSince >= self->config_.backup.failbackMs)
+                        {
+                            shared.active = 0;
+                            log::info("srt_failback", {{"channel", self->config_.id}});
+                        }
+                    }
+                    else
+                    {
+                        shared.mainStableSince = 0;
+                    }
                 }
             }
+            pipe = shared.active == 1 ? &shared.backupPipe : &shared.mainPipe;
         }
-        pipe = shared.active == 1 ? &shared.backupPipe : &shared.mainPipe;
+        if (self->stop_.load())
+        {
+            return AVERROR_EXIT;
+        }
+        if (shared.restartDemux)
+        {
+            return AVERROR_EOF;
+        }
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard const lock{pipe->mu};
+            generation = pipe->generation;
+        }
+        char const* restart = nullptr;
+        if (pipe != shared.readingPipe && shared.readingPipe != nullptr)
+        {
+            // A failover or failback: the other link's stream has its own PIDs and timestamps,
+            // and what it queued while it was not read is old.
+            std::lock_guard const lock{pipe->mu};
+            pipe->bytes.clear();
+            restart = "switch";
+        }
+        else if (pipe != shared.readingPipe)
+        {
+            // The first read of this demuxer.
+            shared.readingPipe = pipe;
+            shared.readingGeneration = generation;
+        }
+        else if (generation != shared.readingGeneration)
+        {
+            // The link reconnected (its old bytes were dropped then).
+            restart = "reconnect";
+        }
+        if (restart != nullptr)
+        {
+            // End this demuxer, so that the stream is probed and decoded from scratch (its PIDs,
+            // timestamps and format may all be new).
+            log::info("srt_stream_restart",
+                {{"channel", self->config_.id}, {"link", pipe == &shared.backupPipe ? "backup" : "main"}, {"reason", restart}});
+            shared.restartDemux = true;
+            return AVERROR_EOF;
+        }
+        int const n = pipe->readSome(buf, bufSize, self->stop_);
+        if (n > 0)
+        {
+            return n;
+        }
     }
-    if (self->stop_.load())
-    {
-        return AVERROR_EXIT;
-    }
-    int const n = pipe->readSome(buf, bufSize, self->stop_);
-    if (n == 0)
-    {
-        return AVERROR(EAGAIN);
-    }
-    return n;
 }
 
 void IngestPipeline::runIo()
 {
     ffmpegOnce();
+    // Counts the pictures handed to the writer, across demuxer restarts: the writer tells new
+    // pictures from old ones by it (restarting at 0 left a slate until it passed the old count).
+    std::int64_t frameIndex = 0;
+    // Why the stream could not be opened, at most every 5 s; the open is retried.
+    std::int64_t lastProbeLog = 0;
+    auto const probeFailed = [&](std::string const& reason) {
+        auto const now = monoNowMs();
+        if (lastProbeLog == 0 || now - lastProbeLog >= 5000)
+        {
+            lastProbeLog = now;
+            log::warn("ingest_probe_failed", {{"channel", config_.id}, {"reason", reason}});
+        }
+    };
     while (!stop_.load())
     {
         AVFormatContext* fmt = avformat_alloc_context();
@@ -799,8 +888,14 @@ void IngestPipeline::runIo()
         fmt->max_analyze_duration = 800000;
         fmt->interrupt_callback.callback = [](void* opaque) { return static_cast<std::atomic<bool>*>(opaque)->load() ? 1 : 0; };
         fmt->interrupt_callback.opaque = &stop_;
-        if (avformat_open_input(&fmt, nullptr, nullptr, nullptr) < 0)
+        shared_->readingPipe = nullptr;
+        shared_->restartDemux = false;
+        if (int const opened = avformat_open_input(&fmt, nullptr, nullptr, nullptr); opened < 0)
         {
+            if (!stop_.load() && opened != AVERROR_EOF)
+            {
+                probeFailed(ffError(opened));
+            }
             if (avio != nullptr)
             {
                 av_freep(&avio->buffer);
@@ -876,6 +971,7 @@ void IngestPipeline::runIo()
         }
         if (videoStream < 0)
         {
+            probeFailed("no video stream (" + std::to_string(fmt->nb_streams) + " streams)");
             avformat_close_input(&fmt);
             if (avio != nullptr)
             {
@@ -937,6 +1033,7 @@ void IngestPipeline::runIo()
             publish(failed);
             return;
         }
+        lastProbeLog = 0;
         log::info("codec_opened",
             {{"channel", config_.id}, {"direction", "ingest"}, {"codec", decoderName}, {"hw", hardware ? "nvdec" : "none"}, {"fallback", fallback}});
         {
@@ -1010,7 +1107,6 @@ void IngestPipeline::runIo()
         mapper.stepNs = std::max<std::int64_t>(40000000, static_cast<std::int64_t>(config_.syncLatencyMs) * 500000LL);
         // TAI arrival of each video packet by its PTS (ns), for the codec delay.
         std::map<std::int64_t, std::int64_t> arrivals;
-        std::int64_t frameIndex = 0;
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
         AVFrame* filtered = av_frame_alloc();
@@ -1833,12 +1929,44 @@ void EgressPipeline::run()
     });
 
     auto const slateFrame = renderSlate(config_.target.width, config_.target.height, config_.label, true);
+    // Declared before the readers: a reader is released into its domain's instance.
+    std::shared_ptr<MxlDomain> openDomain;
     MxlVideoReader videoReader;
     MxlAudioReader audioReader;
-    std::shared_ptr<MxlDomain> openDomain;
-    std::string openVideo;
-    std::string openAudio;
+    // The activation the readers belong to (domain, flows, generations).
+    std::string openRoute;
     std::unique_ptr<MxlSync> sync;
+    // Why the next open happens, for its log line.
+    std::string openReason = "activation";
+    auto nextOpen = std::chrono::steady_clock::time_point{};
+    auto nextCheck = std::chrono::steady_clock::time_point{};
+    // A flow's head as last seen, when it last moved, and whether its stall was answered by a
+    // reopen already (once per stall). [0] video, [1] audio.
+    struct HeadWatch
+    {
+        std::uint64_t head = 0;
+        std::chrono::steady_clock::time_point moved;
+        bool reopened = false;
+        void reset(std::uint64_t now, std::chrono::steady_clock::time_point at)
+        {
+            head = now;
+            moved = at;
+        }
+        // True once the head has not moved for 1 s and no reopen answered it yet.
+        bool stalled(std::uint64_t now, std::chrono::steady_clock::time_point at)
+        {
+            if (now != head)
+            {
+                reset(now, at);
+                reopened = false;
+                return false;
+            }
+            return !reopened && at - moved >= std::chrono::seconds(1);
+        }
+    };
+    HeadWatch watch[2];
+    std::uint64_t reopensRecreated = 0;
+    std::uint64_t reopensStalled = 0;
     AVCodecContext* videoEnc = nullptr;
     // NVENC input frames on the GPU (primary CUDA context), when the converter is available.
     AVBufferRef* gpuFrames = nullptr;
@@ -2165,28 +2293,102 @@ void EgressPipeline::run()
         std::size_t pictureSize = slateFrame.size();
         VideoFormat source = config_.target;
         bool live = false;
-        if (videoRoute.active && !videoRoute.flowId.empty())
+        bool const wantAudio = audioRoute.active && !audioRoute.flowId.empty();
+        std::string const routeKey = videoRoute.active && !videoRoute.flowId.empty()
+                                         ? videoRoute.domainId + "/" + videoRoute.flowId + "#" + std::to_string(videoRoute.generation) + " " +
+                                               (wantAudio ? audioRoute.flowId + "#" + std::to_string(audioRoute.generation) : std::string())
+                                         : std::string();
+        if (routeKey != openRoute)
         {
-            if (videoRoute.flowId != openVideo)
+            // A new activation (also of the same flow) or the first one: a fresh MXL instance and
+            // fresh readers, nothing kept from before.
+            sync.reset();
+            videoReader.close();
+            audioReader.close();
+            openDomain.reset();
+            openRoute = routeKey;
+            openReason = "activation";
+            nextOpen = {};
+            watch[0].reopened = false;
+            watch[1].reopened = false;
+        }
+        if (!routeKey.empty())
+        {
+            auto const now = std::chrono::steady_clock::now();
+            // A writer that restarts deletes its flow and creates it again under the same id; a
+            // reader keeps the deleted files and sees one frozen grain. Video and audio are checked
+            // on their own, 4 times a second.
+            if ((videoReader.isOpen() || audioReader.isOpen()) && now >= nextCheck)
             {
-                bool mirror = false;
-                openDomain = domains_(videoRoute.domainId, &mirror);
-                videoReader.close();
-                audioReader.close();
-                sync.reset();
-                openVideo.clear();
-                openAudio.clear();
-                if (openDomain && videoReader.open(*openDomain, videoRoute.flowId))
+                nextCheck = now + std::chrono::milliseconds(250);
+                bool videoGone = videoReader.isOpen() && videoReader.replaced();
+                bool audioGone = audioReader.isOpen() && audioReader.replaced();
+                std::string why = videoGone || audioGone ? "recreated" : "";
+                if (why.empty())
                 {
-                    openVideo = videoRoute.flowId;
-                    source = videoReader.format();
-                    if (audioRoute.active && audioReader.open(*openDomain, audioRoute.flowId))
+                    // A head that stands still for 1 s: a flow re-created under the same inode, or
+                    // a writer that paused. Both open flows are opened again, once per stall.
+                    bool const videoStalled = videoReader.isOpen() && watch[0].stalled(videoReader.head(), now);
+                    bool const audioStalled = audioReader.isOpen() && watch[1].stalled(audioReader.head(), now);
+                    if (videoStalled || audioStalled)
                     {
-                        openAudio = audioRoute.flowId;
+                        why = "stalled";
+                        videoGone = videoReader.isOpen();
+                        audioGone = audioReader.isOpen();
+                        watch[0].reopened = true;
+                        watch[1].reopened = true;
+                    }
+                }
+                if (!why.empty())
+                {
+                    ++(why == "recreated" ? reopensRecreated : reopensStalled);
+                    log::warn("mxl_flow_reopen", {{"channel", config_.id}, {"reason", why}, {"video", videoGone ? videoRoute.flowId : ""},
+                                                     {"audio", audioGone ? audioRoute.flowId : ""}});
+                    sync.reset();
+                    if (videoGone)
+                    {
+                        videoReader.close();
+                    }
+                    if (audioGone)
+                    {
+                        audioReader.close();
+                    }
+                    openReason = why;
+                    nextOpen = {};
+                }
+            }
+            bool const needOpen = !videoReader.isOpen() || (wantAudio && !audioReader.isOpen());
+            if (needOpen && now >= nextOpen)
+            {
+                // Missing flows are retried 5 times a second.
+                nextOpen = now + std::chrono::milliseconds(200);
+                if (!openDomain)
+                {
+                    bool mirror = false;
+                    openDomain = domains_(videoRoute.domainId, &mirror);
+                }
+                bool opened = false;
+                if (openDomain && !videoReader.isOpen() && videoReader.open(*openDomain, videoRoute.flowId))
+                {
+                    opened = true;
+                    watch[0].reset(videoReader.head(), now);
+                }
+                if (openDomain && videoReader.isOpen() && wantAudio && !audioReader.isOpen() && audioReader.open(*openDomain, audioRoute.flowId))
+                {
+                    opened = true;
+                    watch[1].reset(audioReader.head(), now);
+                }
+                if (opened)
+                {
+                    sync.reset();
+                    if (audioReader.isOpen())
+                    {
                         sync = std::make_unique<MxlSync>(*openDomain);
                         sync->addVideo(videoReader);
                         sync->addAudio(audioReader);
                     }
+                    log::info("mxl_flow_open", {{"channel", config_.id}, {"reason", openReason}, {"video", videoRoute.flowId},
+                                                   {"audio", audioReader.isOpen() ? audioRoute.flowId : ""}});
                 }
             }
             if (videoReader.isOpen())
@@ -2533,6 +2735,8 @@ void EgressPipeline::run()
         status.frames = frames;
         status.repeats = repeats;
         status.drops = drops;
+        status.flowReopensRecreated = reopensRecreated;
+        status.flowReopensStalled = reopensStalled;
         status.encodeFps = frames / std::max(0.001, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
         status.encodeLatencyCount = status_.encodeLatencyCount;
         status.encodeLatencySum = status_.encodeLatencySum;

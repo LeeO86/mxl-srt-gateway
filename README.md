@@ -37,6 +37,8 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build -j"$(nproc)"
 ./build/unit-tests
 SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
+tests/integration/reopen.sh ./build/mxl-srt-gateway
+tests/integration/reconnect.sh ./build/mxl-srt-gateway
 ```
 
 Pins, recorded in `IMPLEMENTATION_PLAN.md`:
@@ -96,8 +98,8 @@ the secret; they are never logged and are omitted from the API unless
 set, the Query API lists this node. `/livez` is 200 while the process is up.
 `/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix: per channel
 state, SRT statistics, frames, frame sync, audio, decode and encode rates,
-`codec_delay_ms`, `encode_latency_seconds`, `codec_info`, `failover_active`;
-per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
+`codec_delay_ms`, `encode_latency_seconds`, `codec_info`, `failover_active`,
+`mxl_flow_reopens_total` (label `reason`: `recreated`, `stalled`); per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
 DCGM exporter has GPU memory and NVENC/NVDEC load. Whether a channel's video
 runs on NVDEC or NVENC is its status's `video_codec_hw` (`nvdec`, `nvenc`,
 `none`) and the `codec_opened` log line of each decoder or encoder open, with
@@ -196,6 +198,15 @@ Egress reads each output grain's video and audio `egress.read_offset_grains`
 them, and stamps each encoded audio frame with the time of its first sample.
 Its timestamps follow the output grain's TAI time: a loop that falls more than
 4 grains behind continues at the current grain and leaves a gap.
+A writer that restarts (a multiviewer, a player) deletes its flow and creates
+it again under the same id. The egress checks its video and audio flows on
+their own, 4 times a second, and opens a flow again when its data file is gone
+or has a new inode, or when MXL reports it invalid. When the head of either
+has not moved for 1 s it opens both again, once per stall. Each such reopen
+logs `mxl_flow_reopen` (`reason` `recreated` or `stalled`) and counts in
+`mxl_flow_reopens_total{channel,reason}`, each open logs `mxl_flow_open`. Each activation
+(also of the same flow) and each channel start opens the flows in a new MXL
+instance, so no reader of a deleted flow is kept.
 Each audio track goes to its encoder in that encoder's sample format (SMPTE
 302M: 24 bit, MP2: 16 bit). A track whose encoder does not open is left out of
 the TS and logs `audio_encoder_failed`. An egress channel whose document has
@@ -207,5 +218,5 @@ lab host those 8 encoders take about 0.9 of a core in the egress loop. Set
 ## Layout
 
 `src/` is the gateway, `web/` the Vue 3 UI embedded in the binary, `tests/`
-doctest plus `tests/integration/ci.sh`, `deploy/` the Kubernetes manifests and
+doctest plus `tests/integration/ci.sh`, `reopen.sh` and `reconnect.sh`, `deploy/` the Kubernetes manifests and
 Grafana dashboard, `docker/` the image and Compose examples.

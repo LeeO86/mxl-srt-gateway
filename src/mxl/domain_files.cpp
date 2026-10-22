@@ -8,6 +8,8 @@
 #include <fstream>
 #include <sstream>
 
+#include <sys/stat.h>
+
 namespace srtgw
 {
 namespace
@@ -166,5 +168,18 @@ void interleaveSlice(SampleFragment const& first, SampleFragment const& second, 
             out[frame * channels + channel] = wrapped[frame - head];
         }
     }
+}
+
+bool flowFileId(std::string const& domainPath, std::string const& flowId, FlowFileId* id)
+{
+    auto const path = std::filesystem::path(domainPath) / (flowId + ".mxl-flow") / "data";
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0)
+    {
+        return false;
+    }
+    id->dev = static_cast<std::uint64_t>(st.st_dev);
+    id->ino = static_cast<std::uint64_t>(st.st_ino);
+    return true;
 }
 } // namespace srtgw

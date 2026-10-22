@@ -11,6 +11,8 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-13 \
 cmake --build build -j"$(nproc)"
 ./build/unit-tests
 SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
+tests/integration/reopen.sh ./build/mxl-srt-gateway
+tests/integration/reconnect.sh ./build/mxl-srt-gateway
 ```
 
 Lint is `-Wall -Wextra` on the compile. A clean build is the lint signal.

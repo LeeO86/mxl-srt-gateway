@@ -153,8 +153,23 @@ runtime (only that channel reconnects). Rendezvous mode is optional.
   passphrase and key length (AES-128/192/256), `streamid` (caller: sent; listener:
   accepted values configurable), max bandwidth / overhead, payload size 1316.
 - Listener accepts one connection per channel; a second caller is rejected and
-  logged.
+  logged (`second_peer`). On an ingest listener, when the connected peer has
+  sent nothing for 1 s and another caller waits, that caller is accepted and
+  checked (passphrase, `peer_allow`, `accepted_streamids`, rate limit) and, only
+  if it passes, replaces the peer (`srt_peer_replaced`); otherwise it is rejected
+  as `second_peer` and the peer stays. A sender killed without an SRT shutdown is
+  only noticed after SRT's 5 s idle timeout. While the peer has been silent for
+  less than 1 s a waiting caller is left queued, not rejected. An egress
+  listener does not replace its peer.
 - Reconnect: caller retries with backoff (1 s → 10 s); listener keeps listening.
+  Every new connection is a new stream for the ingest: the bytes left from the
+  old one are dropped and the demuxer and decoders start again
+  (`srt_stream_restart`, `reason` `reconnect`), so new PIDs, a new PTS/PCR base
+  or another format are probed from scratch. A failover or failback does the
+  same (`reason` `switch`) and drops what the other link queued while it was not
+  read. A stream that cannot be opened is retried and logged
+  (`ingest_probe_failed`, at most every 5 s). A lost link logs `srt_disconnected`
+  and its SRT statistics (rate, RTT, buffer) read 0 until it is back.
 - Optional backup input: a second SRT source (listener port or caller URL);
   automatic switch on loss of the main input after `failover_ms`, switch back
   after `failback_ms` of stable main signal (or manual). SRT socket groups are not
@@ -319,6 +334,20 @@ corporate firewall. Therefore:
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
+- A re-created flow (the writer restarted: same flow id, new files) is opened
+  again within about 1 s, without a channel restart: every 250 ms the egress
+  checks the flow's `data` file against the device/inode it opened, and MXL's
+  `MXL_ERR_FLOW_INVALID`, and reopens only the flow that changed. Video and
+  audio are checked on their own. When the head of either has not moved for
+  1 s (a flow re-created under the same inode, or a paused writer), both open
+  flows are opened again, once per stall (again after the head moved). A
+  missing flow is retried every 200 ms. Each activation (also of
+  the same flow id) and each channel start opens the flows in a new MXL
+  instance: MXL shares one reader per flow id within an instance, so a reader
+  left open elsewhere would hand back the deleted files. Logs:
+  `mxl_flow_open` (`reason` `activation`, `recreated`, `stalled`) and
+  `mxl_flow_reopen`; metric `mxl_flow_reopens_total{channel,reason}` with
+  `reason` `recreated` or `stalled`.
 
 ### 6.2 Format and encode
 
@@ -446,7 +475,9 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 ingest from a packet's arrival to its picture, egress from a frame into the
 encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
-plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+`mxl_flow_reopens_total` (label `reason` `recreated` or `stalled`: egress
+readers opened again because their flow was re-created or its head stalled,
+§6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,
@@ -500,7 +531,12 @@ Grafana dashboard in `deploy/grafana/`.
      deinterlaces correctly (pixel checks), audio cadence exact.
   2. Source at 59.94 into a 50p target: repeats/drops within expected counts, no
      MXL gaps.
-  3. Kill the SRT source: MXL output continues with hold → slate; reconnect resumes.
+  3. Kill the SRT source: MXL output continues with hold → slate; reconnect resumes
+     (`tests/integration/reconnect.sh`: caller and listener ingest, the source
+     restarts with a new PTS base, other PIDs, HEVC, another format, and from
+     another source port; a failover to the backup link; a caller with the
+     wrong `streamid` does not replace a silent peer; video decodes and audio
+     is back within a few seconds).
   4. Egress from an MXL test flow to SRT, received by FFmpeg/`srt-live-transmit`;
      verify codec, resolution, bitrate, PCR interval.
   5. Multichannel: a TS with 8 stereo AAC PIDs and one with two 8-channel 302M
@@ -511,6 +547,13 @@ Grafana dashboard in `deploy/grafana/`.
      or with a wrong `streamid` and logs the reason.
   7. NMOS: IS-05 activation of an egress receiver to a flow that does not exist
      yet → `waiting` → running when the flow appears.
+  8. A re-created flow (`tests/integration/reopen.sh`): the writer of the
+     egress's flows restarts (same ids, new files); video moves again and audio
+     is back within ~1 s, no mapping of the deleted files is left; a new
+     activation of the same flow, a deactivation (readers released) and activation
+     with the writer restarted in between, and a channel restart open it fresh.
+     A steady flow is not reopened in 10 s; a paused writer (flows kept)
+     costs exactly one stall reopen of video and audio.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency

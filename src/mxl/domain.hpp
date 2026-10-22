@@ -102,12 +102,32 @@ private:
 #endif
 };
 
+// The device and inode of a flow's data file (<domain>/<flow>.mxl-flow/data). A writer that
+// restarts deletes the flow and creates it again under the same id: the file gets a new inode.
+struct FlowFileId
+{
+    std::uint64_t dev = 0;
+    std::uint64_t ino = 0;
+    bool operator==(FlowFileId const&) const = default;
+};
+// False when the data file is missing.
+bool flowFileId(std::string const& domainPath, std::string const& flowId, FlowFileId* id);
+
 class MxlVideoReader
 {
 public:
+    MxlVideoReader() = default;
+    ~MxlVideoReader();
+    MxlVideoReader(MxlVideoReader const&) = delete;
+    MxlVideoReader& operator=(MxlVideoReader const&) = delete;
+
     bool open(MxlDomain& domain, std::string const& flowId);
     void close();
     [[nodiscard]] bool isOpen() const;
+    // True when the flow this reader maps is gone: its data file is missing or has another
+    // device/inode than at open, or MXL reported the flow invalid. The reader then reads the
+    // deleted files, and only a new open reads the writer's new flow.
+    [[nodiscard]] bool replaced() const;
     [[nodiscard]] std::uint64_t head() const;
     [[nodiscard]] VideoFormat format() const;
     bool read(std::uint64_t index, std::uint64_t timeoutNs, std::vector<std::uint8_t>& payload, bool* invalid);
@@ -123,6 +143,9 @@ private:
     MxlDomain* domain_ = nullptr;
     mxlFlowReader reader_ = nullptr;
 #endif
+    std::string flowId_;
+    FlowFileId file_;
+    bool invalid_ = false;
     VideoFormat format_;
     bool open_ = false;
 };
@@ -130,10 +153,19 @@ private:
 class MxlAudioReader
 {
 public:
+    MxlAudioReader() = default;
+    ~MxlAudioReader();
+    MxlAudioReader(MxlAudioReader const&) = delete;
+    MxlAudioReader& operator=(MxlAudioReader const&) = delete;
+
     bool open(MxlDomain& domain, std::string const& flowId);
     void close();
     [[nodiscard]] bool isOpen() const;
+    // See MxlVideoReader::replaced.
+    [[nodiscard]] bool replaced() const;
     [[nodiscard]] int channels() const;
+    // The flow's head sample index (0 when closed).
+    [[nodiscard]] std::uint64_t head() const;
     bool read(std::uint64_t endIndex, int frames, std::uint64_t timeoutNs, std::vector<float>& interleaved);
 #if SRTGW_WITH_MXL
     [[nodiscard]] mxlFlowReader handle() const;
@@ -145,6 +177,9 @@ private:
     mxlFlowReader reader_ = nullptr;
     std::size_t maxRead_ = 0;
 #endif
+    std::string flowId_;
+    FlowFileId file_;
+    bool invalid_ = false;
     int channels_ = 0;
     bool open_ = false;
 };
