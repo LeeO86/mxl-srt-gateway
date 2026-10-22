@@ -44,12 +44,19 @@ public:
     void rejectPending(AttemptLimiter& limiter);
     // Listener with a connected peer: another caller is waiting to be accepted.
     [[nodiscard]] bool hasPendingCaller() const;
+    // Listener: accepts the waiting caller and, when it passes the access checks, drops the
+    // connected peer for it (true). A caller that fails them is rejected as `second_peer` and the
+    // peer stays.
+    bool takeOverPending(AttemptLimiter& limiter);
     [[nodiscard]] SrtStats stats() const;
     [[nodiscard]] bool connected() const;
 
 private:
     bool openSocket(bool listener);
     bool acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter);
+    // Accepts a queued caller and runs the access checks; the socket, or -1 when there was none or
+    // it was rejected (logged with `rejectAs` or the check's reason, and counted).
+    int acceptChecked(AttemptLimiter& limiter, char const* rejectAs, std::string* peerText, std::string* streamId);
     void applyOptions(int fd, bool caller) const;
     void logReject(std::string const& peer, std::string const& reason) const;
 

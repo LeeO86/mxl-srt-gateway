@@ -11,7 +11,9 @@ WORK="$(mktemp -d)"
 API=http://127.0.0.1:18140/api/v1
 GW=""
 SRC=""
-trap 'rc=$?; [ "$rc" = 0 ] || tail -n 60 "$WORK/gw.log" >&2 || true; kill $GW $SRC 2>/dev/null || true; rm -rf "$WORK"' EXIT
+MAIN=""
+BACKUP=""
+trap 'rc=$?; [ "$rc" = 0 ] || tail -n 60 "$WORK/gw.log" >&2 || true; kill $GW $SRC $MAIN $BACKUP 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 cat > "$WORK/config.json" <<EOF
 {
@@ -36,6 +38,22 @@ cat > "$WORK/config.json" <<EOF
       "label": "RX listener",
       "direction": "ingest",
       "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19220, "latency_ms": 120},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "25"}
+    },
+    {
+      "id": "rx-guard",
+      "label": "RX guard",
+      "direction": "ingest",
+      "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19230, "latency_ms": 120, "accepted_streamids": ["good"]},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "25"}
+    },
+    {
+      "id": "rx-backup",
+      "label": "RX backup",
+      "direction": "ingest",
+      "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19240, "latency_ms": 120},
+      "backup": {"enabled": true, "failover_ms": 1000, "failback_ms": 60000,
+                 "endpoint": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19241, "latency_ms": 120}},
       "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "25"}
     }
   ]
@@ -127,6 +145,51 @@ sleep 3
 send "srt://127.0.0.1:19220?mode=caller&latency=120" 30 1920x1080 50 libx264 0
 sleep 6
 check_writing rx-listener "listener, caller restarted (1080p50)"
+stop_source
+
+# The log says what happened: a stream restart per new connection, the lost links, and the
+# caller that took over from a silent peer.
+grep -q '"event":"srt_stream_restart","channel":"rx-caller","link":"main","reason":"reconnect"' "$WORK/gw.log"
+grep -q '"event":"srt_disconnected","channel":"rx-caller"' "$WORK/gw.log"
+grep -q '"event":"srt_peer_replaced","channel":"rx-listener"' "$WORK/gw.log"
+echo "log lines ok"
+
+# A caller that fails the access checks (wrong streamid) must not replace a silent peer.
+send "srt://127.0.0.1:19230?mode=caller&latency=120&streamid=good" 30 1280x720 25 libx264 0
+sleep 5
+check_writing rx-guard "guard, legit caller"
+stop_source
+# After 1 s of silence, when a waiting caller may take over.
+sleep 1.5
+send "srt://127.0.0.1:19230?mode=caller&latency=120&streamid=bad" 30 1280x720 25 libx264 0
+sleep 3
+stop_source
+if grep -q '"event":"srt_peer_replaced","channel":"rx-guard"' "$WORK/gw.log"; then
+  echo "a caller with the wrong streamid replaced the peer" >&2
+  exit 1
+fi
+grep -q '"event":"srt_rejected","channel":"rx-guard","peer":"127.0.0.1","reason":"second_peer"' "$WORK/gw.log"
+echo "guard: wrong streamid rejected, peer kept"
+send "srt://127.0.0.1:19230?mode=caller&latency=120&streamid=good" 30 1280x720 25 libx264 3000
+sleep 6
+check_writing rx-guard "guard, legit caller back"
+stop_source
+
+# Failover: the main link dies, the backup's stream is decoded (a new demuxer, its old bytes dropped).
+send "srt://127.0.0.1:19240?mode=caller&latency=120" 40 1280x720 25 libx264 0
+MAIN=$SRC
+send "srt://127.0.0.1:19241?mode=caller&latency=120" 40 1920x1080 25 libx264 9000
+BACKUP=$SRC
+sleep 5
+check_writing rx-backup "failover, main"
+kill -KILL "$MAIN"
+wait "$MAIN" 2>/dev/null || true
+sleep 4
+grep -q '"event":"srt_failover","channel":"rx-backup"' "$WORK/gw.log"
+grep -q '"event":"srt_stream_restart","channel":"rx-backup","link":"backup","reason":"switch"' "$WORK/gw.log"
+check_writing rx-backup "failover, backup"
+python3 -c "import json,urllib.request,sys; s=json.load(urllib.request.urlopen('$API/channels/rx-backup/status')); sys.exit(0 if s['source_format']=='1080p25' else 1)"
+SRC=$BACKUP
 stop_source
 
 kill -TERM "$GW" || true

@@ -153,14 +153,21 @@ runtime (only that channel reconnects). Rendezvous mode is optional.
   passphrase and key length (AES-128/192/256), `streamid` (caller: sent; listener:
   accepted values configurable), max bandwidth / overhead, payload size 1316.
 - Listener accepts one connection per channel; a second caller is rejected and
-  logged. When the connected peer has sent nothing for 1 s and another caller
-  waits, the new caller takes over (`srt_peer_replaced`): a sender killed without
-  an SRT shutdown is only noticed after SRT's 5 s idle timeout.
+  logged (`second_peer`). On an ingest listener, when the connected peer has
+  sent nothing for 1 s and another caller waits, that caller is accepted and
+  checked (passphrase, `peer_allow`, `accepted_streamids`, rate limit) and, only
+  if it passes, replaces the peer (`srt_peer_replaced`); otherwise it is rejected
+  as `second_peer` and the peer stays. A sender killed without an SRT shutdown is
+  only noticed after SRT's 5 s idle timeout. While the peer has been silent for
+  less than 1 s a waiting caller is left queued, not rejected. An egress
+  listener does not replace its peer.
 - Reconnect: caller retries with backoff (1 s → 10 s); listener keeps listening.
   Every new connection is a new stream for the ingest: the bytes left from the
   old one are dropped and the demuxer and decoders start again
-  (`srt_stream_restart`), so new PIDs, a new PTS/PCR base or another format are
-  probed from scratch. A stream that cannot be opened is retried and logged
+  (`srt_stream_restart`, `reason` `reconnect`), so new PIDs, a new PTS/PCR base
+  or another format are probed from scratch. A failover or failback does the
+  same (`reason` `switch`) and drops what the other link queued while it was not
+  read. A stream that cannot be opened is retried and logged
   (`ingest_probe_failed`, at most every 5 s). A lost link logs `srt_disconnected`
   and its SRT statistics (rate, RTT, buffer) read 0 until it is back.
 - Optional backup input: a second SRT source (listener port or caller URL);
@@ -527,7 +534,9 @@ Grafana dashboard in `deploy/grafana/`.
   3. Kill the SRT source: MXL output continues with hold → slate; reconnect resumes
      (`tests/integration/reconnect.sh`: caller and listener ingest, the source
      restarts with a new PTS base, other PIDs, HEVC, another format, and from
-     another source port; video decodes and audio is back within a few seconds).
+     another source port; a failover to the backup link; a caller with the
+     wrong `streamid` does not replace a silent peer; video decodes and audio
+     is back within a few seconds).
   4. Egress from an MXL test flow to SRT, received by FFmpeg/`srt-live-transmit`;
      verify codec, resolution, bitrate, PCR interval.
   5. Multichannel: a TS with 8 stereo AAC PIDs and one with two 8-channel 302M

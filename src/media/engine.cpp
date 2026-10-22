@@ -704,16 +704,25 @@ void IngestPipeline::runLink(bool backup)
         auto lastData = std::chrono::steady_clock::now();
         while (!stop_.load() && link.connected())
         {
-            // A listener whose peer sent nothing for 1 s while another caller waits: the peer is
-            // gone (a sender killed without a shutdown is only noticed after SRT's 5 s idle
-            // timeout), so the new caller takes over instead of being turned away.
-            if (std::chrono::steady_clock::now() - lastData >= std::chrono::seconds(1) && link.hasPendingCaller())
+            auto const idle = std::chrono::steady_clock::now() - lastData;
+            if (idle >= std::chrono::seconds(1))
             {
-                log::warn("srt_peer_replaced", {{"channel", config_.id}, {"link", backup ? "backup" : "main"}, {"peer", link.stats().peer}});
-                break;
+                // A listener whose peer sent nothing for 1 s while another caller waits: the peer
+                // is likely gone (a sender killed without a shutdown is only noticed after SRT's
+                // 5 s idle timeout). The caller takes over if it passes the access checks.
+                if (link.takeOverPending(limiter))
+                {
+                    std::lock_guard const lock{pipe.mu};
+                    pipe.bytes.clear();
+                    ++pipe.generation;
+                    pipe.peer = link.stats().peer;
+                    lastData = std::chrono::steady_clock::now();
+                }
             }
-            if (!backup)
+            else if (!backup && idle < std::chrono::milliseconds(200))
             {
+                // A caller while the peer sends is a second peer. While the peer is silent the
+                // caller waits (a sender restarting fast is not counted against its rate limit).
                 link.rejectPending(limiter);
             }
             std::uint8_t buffer[1500];
@@ -810,17 +819,32 @@ int readActive(void* opaque, std::uint8_t* buf, int bufSize)
             std::lock_guard const lock{pipe->mu};
             generation = pipe->generation;
         }
-        if (pipe != shared.readingPipe)
+        char const* restart = nullptr;
+        if (pipe != shared.readingPipe && shared.readingPipe != nullptr)
         {
-            // First read, or a failover/failback: the demuxer goes on with the other link's stream.
+            // A failover or failback: the other link's stream has its own PIDs and timestamps,
+            // and what it queued while it was not read is old.
+            std::lock_guard const lock{pipe->mu};
+            pipe->bytes.clear();
+            restart = "switch";
+        }
+        else if (pipe != shared.readingPipe)
+        {
+            // The first read of this demuxer.
             shared.readingPipe = pipe;
             shared.readingGeneration = generation;
         }
         else if (generation != shared.readingGeneration)
         {
-            // The link reconnected: end this demuxer, so that the stream is probed and decoded
-            // from scratch (its PIDs, timestamps and format may all be new).
-            log::info("srt_stream_restart", {{"channel", self->config_.id}, {"link", pipe == &shared.backupPipe ? "backup" : "main"}});
+            // The link reconnected (its old bytes were dropped then).
+            restart = "reconnect";
+        }
+        if (restart != nullptr)
+        {
+            // End this demuxer, so that the stream is probed and decoded from scratch (its PIDs,
+            // timestamps and format may all be new).
+            log::info("srt_stream_restart",
+                {{"channel", self->config_.id}, {"link", pipe == &shared.backupPipe ? "backup" : "main"}, {"reason", restart}});
             shared.restartDemux = true;
             return AVERROR_EOF;
         }
@@ -835,6 +859,9 @@ int readActive(void* opaque, std::uint8_t* buf, int bufSize)
 void IngestPipeline::runIo()
 {
     ffmpegOnce();
+    // Counts the pictures handed to the writer, across demuxer restarts: the writer tells new
+    // pictures from old ones by it (restarting at 0 left a slate until it passed the old count).
+    std::int64_t frameIndex = 0;
     // Why the stream could not be opened, at most every 5 s; the open is retried.
     std::int64_t lastProbeLog = 0;
     auto const probeFailed = [&](std::string const& reason) {
@@ -1080,7 +1107,6 @@ void IngestPipeline::runIo()
         mapper.stepNs = std::max<std::int64_t>(40000000, static_cast<std::int64_t>(config_.syncLatencyMs) * 500000LL);
         // TAI arrival of each video packet by its PTS (ns), for the codec delay.
         std::map<std::int64_t, std::int64_t> arrivals;
-        std::int64_t frameIndex = 0;
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
         AVFrame* filtered = av_frame_alloc();

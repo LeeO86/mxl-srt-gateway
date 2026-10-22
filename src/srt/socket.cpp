@@ -278,45 +278,92 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         {
             continue;
         }
-        sockaddr_storage peer{};
-        int peerLength = sizeof(peer);
-        int const client = srt_accept(listenFd_, reinterpret_cast<sockaddr*>(&peer), &peerLength);
-        if (client == SRT_INVALID_SOCK)
+        std::string peerText;
+        std::string streamId;
+        int const client = acceptChecked(limiter, nullptr, &peerText, &streamId);
+        if (client < 0)
         {
-            std::string const message = srt_getlasterror_str();
-            if (message.find("password") != std::string::npos || message.find("reject") != std::string::npos || message.find("Passphrase") != std::string::npos)
-            {
-                logReject(ipOf(peer), "passphrase");
-            }
             continue;
         }
-        auto const peerText = peerOf(client);
-        auto const ip = ipOf(peer);
-        AccessInput input;
-        input.peerIp = ip;
-        input.streamId = streamIdOf(client);
-        input.nowMs = monoNowMs();
-        auto const decision = evaluateAccess(policyFor(config_), input, &limiter);
-        if (!decision.accept)
-        {
-            limiter.record(ip, input.nowMs);
-            logReject(peerText.empty() ? ip : peerText, decision.reason);
-            srt_close(client);
-            continue;
-        }
-        int const recvTimeout = 200;
-        int const sendTimeout = 500;
-        setOpt(client, SRTO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
-        setOpt(client, SRTO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
         dataFd_ = client;
         std::lock_guard const lock{mutex_};
         stats_.connected = true;
         stats_.peer = peerText;
-        stats_.streamId = input.streamId;
+        stats_.streamId = streamId;
         log::info("srt_connected", {{"channel", channelId_}, {"peer", stats_.peer}, {"mode", config_.mode}});
         return true;
     }
     return false;
+}
+
+int SrtLink::acceptChecked(AttemptLimiter& limiter, char const* rejectAs, std::string* peerText, std::string* streamId)
+{
+    sockaddr_storage peer{};
+    int peerLength = sizeof(peer);
+    int const client = srt_accept(listenFd_, reinterpret_cast<sockaddr*>(&peer), &peerLength);
+    if (client == SRT_INVALID_SOCK)
+    {
+        std::string const message = srt_getlasterror_str();
+        if (message.find("password") != std::string::npos || message.find("reject") != std::string::npos || message.find("Passphrase") != std::string::npos)
+        {
+            logReject(ipOf(peer), "passphrase");
+        }
+        return -1;
+    }
+    *peerText = peerOf(client);
+    auto const ip = ipOf(peer);
+    AccessInput input;
+    input.peerIp = ip;
+    input.streamId = streamIdOf(client);
+    input.nowMs = monoNowMs();
+    auto const decision = evaluateAccess(policyFor(config_), input, &limiter);
+    if (!decision.accept)
+    {
+        limiter.record(ip, input.nowMs);
+        logReject(peerText->empty() ? ip : *peerText, rejectAs != nullptr ? rejectAs : decision.reason);
+        srt_close(client);
+        return -1;
+    }
+    int const recvTimeout = 200;
+    int const sendTimeout = 500;
+    setOpt(client, SRTO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
+    setOpt(client, SRTO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+    *streamId = input.streamId;
+    return client;
+}
+
+bool SrtLink::takeOverPending(AttemptLimiter& limiter)
+{
+    if (!hasPendingCaller())
+    {
+        return false;
+    }
+    std::string peerText;
+    std::string streamId;
+    int const client = acceptChecked(limiter, "second_peer", &peerText, &streamId);
+    if (client < 0)
+    {
+        return false;
+    }
+    int old = -1;
+    std::string oldPeer;
+    {
+        std::lock_guard const lock{mutex_};
+        old = dataFd_;
+        oldPeer = stats_.peer;
+        dataFd_ = client;
+        stats_ = SrtStats{};
+        stats_.connected = true;
+        stats_.peer = peerText;
+        stats_.streamId = streamId;
+    }
+    if (old >= 0)
+    {
+        srt_close(old);
+    }
+    log::warn("srt_peer_replaced", {{"channel", channelId_}, {"old", oldPeer}, {"peer", peerText}});
+    log::info("srt_connected", {{"channel", channelId_}, {"peer", peerText}, {"mode", config_.mode}});
+    return true;
 }
 
 bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
