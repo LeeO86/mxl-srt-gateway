@@ -37,8 +37,9 @@ struct PipelineStatus
     std::uint64_t frames = 0;
     std::uint64_t repeats = 0;
     std::uint64_t drops = 0;
-    // Egress: readers opened again because their MXL flow was re-created (or stalled).
-    std::uint64_t flowReopens = 0;
+    // Egress: readers opened again because their MXL flow was re-created, or its head stalled.
+    std::uint64_t flowReopensRecreated = 0;
+    std::uint64_t flowReopensStalled = 0;
     double driftPpm = 0;
     double fifoMs = 0;
     std::uint64_t decodeErrors = 0;

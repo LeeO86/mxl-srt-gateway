@@ -322,14 +322,17 @@ corporate firewall. Therefore:
 - A re-created flow (the writer restarted: same flow id, new files) is opened
   again within about 1 s, without a channel restart: every 250 ms the egress
   checks the flow's `data` file against the device/inode it opened, and MXL's
-  `MXL_ERR_FLOW_INVALID`; a head that has not moved for 1 s also reopens once
-  (a flow re-created under the same inode). Video and audio are checked on
-  their own; a missing flow is retried every 200 ms. Each activation (also of
+  `MXL_ERR_FLOW_INVALID`, and reopens only the flow that changed. Video and
+  audio are checked on their own. When the head of either has not moved for
+  1 s (a flow re-created under the same inode, or a paused writer), both open
+  flows are opened again, once per stall (again after the head moved). A
+  missing flow is retried every 200 ms. Each activation (also of
   the same flow id) and each channel start opens the flows in a new MXL
   instance: MXL shares one reader per flow id within an instance, so a reader
   left open elsewhere would hand back the deleted files. Logs:
   `mxl_flow_open` (`reason` `activation`, `recreated`, `stalled`) and
-  `mxl_flow_reopen`; metric `mxl_flow_reopens_total`.
+  `mxl_flow_reopen`; metric `mxl_flow_reopens_total{channel,reason}` with
+  `reason` `recreated` or `stalled`.
 
 ### 6.2 Format and encode
 
@@ -457,8 +460,9 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 ingest from a packet's arrival to its picture, egress from a frame into the
 encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
-`mxl_flow_reopens_total` (egress readers opened again because their flow was
-re-created or stalled, §6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+`mxl_flow_reopens_total` (label `reason` `recreated` or `stalled`: egress
+readers opened again because their flow was re-created or its head stalled,
+§6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,
@@ -528,6 +532,8 @@ Grafana dashboard in `deploy/grafana/`.
      is back within ~1 s, no mapping of the deleted files is left; a new
      activation of the same flow, a deactivation (readers released) and activation
      with the writer restarted in between, and a channel restart open it fresh.
+     A steady flow is not reopened in 10 s; a paused writer (flows kept)
+     costs exactly one stall reopen of video and audio.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency

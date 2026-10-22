@@ -5,15 +5,15 @@
 ### Fixes
 
 - An egress kept reading a flow that its writer had deleted and created again under the same id (a multiviewer restart): it sent one frame and then only repeats (platform, 2026-10-22: `video_frames_out` 2543, `framesync_repeats` 2542; `/proc/<pid>/maps` had all 11 mappings of the flow `(deleted)`), and neither a new IS-05 activation of the same flow nor a channel restart helped. Causes: the egress opened a flow only when its id changed, and never closed its readers when it stopped; MXL shares one reader per flow id within an instance, and all egress channels shared one instance per domain, so every later open of that flow got the leaked reader on the deleted files back. Now:
-  - the egress checks its video and audio flows every 250 ms and opens a flow again when its `data` file is gone or has another device/inode than at open, when MXL reports `MXL_ERR_FLOW_INVALID`, or once when its head has not moved for 1 s; a missing flow is retried every 200 ms (an audio flow too, which was opened only together with the video before);
+  - the egress checks its video and audio flows on their own every 250 ms and opens a flow again when its `data` file is gone or has another device/inode than at open, or when MXL reports `MXL_ERR_FLOW_INVALID`. When the head of either has not moved for 1 s (a flow re-created under the same inode, or a paused writer), it opens both again, once per stall. A missing flow is retried every 200 ms (an audio flow too, which was opened only together with the video before);
   - each activation (also of the same flow id) and each channel start opens the flows in a new MXL instance of its own, and the readers are closed when the channel stops or its route is deactivated.
   Measured with `tests/integration/reopen.sh` (720p25, CPU encoder, writer restarted under the egress): 1.4.2 50 repeats in 50 frames after the restart; now 0 in 50, audio back at −20.0 dBFS, no `(deleted)` mapping left; the same after a re-activation, after an IS-05 deactivation and activation with the writer restarted in between (1.4.2 kept the deleted flow mapped after the deactivation), and after a channel restart.
 
 ### Added
 
 - Log lines `mxl_flow_open` (`channel`, `reason` `activation`, `recreated` or `stalled`, `video`, `audio`) on each open of an egress's flows and `mxl_flow_reopen` (warn) when the egress drops a re-created or stalled flow.
-- Metric `mxl_srt_gateway_mxl_flow_reopens_total{channel}`: egress readers opened again because their flow was re-created or stalled.
-- `tests/integration/reopen.sh` (in CI). `mxl-srt-flow-writer` takes the audio flow id as a fifth argument, writes on the grain clock and stops on SIGTERM (deleting its flows).
+- Metric `mxl_srt_gateway_mxl_flow_reopens_total{channel,reason}`, `reason` `recreated` or `stalled`: egress readers opened again because their flow was re-created or its head stalled.
+- `tests/integration/reopen.sh` (in CI). `mxl-srt-flow-writer` takes the audio flow id as a fifth argument, writes on the grain clock, stops on SIGTERM (deleting its flows) and pauses or resumes on SIGUSR1. The test also checks that a steady flow is not reopened in 10 s and that a paused writer costs exactly one stall reopen.
 
 ## 1.4.2
 

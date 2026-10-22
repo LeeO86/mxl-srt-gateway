@@ -514,7 +514,8 @@ ProcessMetrics ChannelManager::metrics() const
         item.videoFrames = status.frames;
         item.repeats = status.repeats;
         item.drops = status.drops;
-        item.flowReopens = status.flowReopens;
+        item.flowReopensRecreated = status.flowReopensRecreated;
+        item.flowReopensStalled = status.flowReopensStalled;
         item.audioDriftPpm = status.driftPpm;
         item.audioFifoMs = status.fifoMs;
         item.decodeErrors = status.decodeErrors;

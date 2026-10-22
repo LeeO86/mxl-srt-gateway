@@ -164,6 +164,8 @@ public:
     // See MxlVideoReader::replaced.
     [[nodiscard]] bool replaced() const;
     [[nodiscard]] int channels() const;
+    // The flow's head sample index (0 when closed).
+    [[nodiscard]] std::uint64_t head() const;
     bool read(std::uint64_t endIndex, int frames, std::uint64_t timeoutNs, std::vector<float>& interleaved);
 #if SRTGW_WITH_MXL
     [[nodiscard]] mxlFlowReader handle() const;

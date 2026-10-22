@@ -1154,7 +1154,8 @@ TEST_CASE("metrics render the channel set")
     channel.state = stateCode("running");
     channel.videoFrames = 10;
     channel.repeats = 2;
-    channel.flowReopens = 3;
+    channel.flowReopensRecreated = 3;
+    channel.flowReopensStalled = 1;
     channel.decoder = "h264-cpu";
     channel.targetFormat = "1080p50";
     channel.encodeLatencyCount = 4;
@@ -1166,7 +1167,8 @@ TEST_CASE("metrics render the channel set")
     CHECK(text.find("mxl_srt_gateway_channel_state{channel=\"in1\"} 4") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_framesync_repeats_total{channel=\"in1\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_info{channel=\"in1\"") != std::string::npos);
-    CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\"} 3") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\",reason=\"recreated\"} 3") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\",reason=\"stalled\"} 1") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_delay_ms{channel=\"in1\"} 12.5") != std::string::npos);
     // No GPU gauges: reading them ran nvidia-smi (1.4.2).
     CHECK(text.find("nvdec_sessions") == std::string::npos);

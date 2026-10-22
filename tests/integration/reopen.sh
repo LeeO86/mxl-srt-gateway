@@ -133,7 +133,7 @@ grep -q '"event":"mxl_flow_reopen","channel":"tx1","reason":"recreated"' "$WORK/
 check_moving "re-created flow"
 check_no_deleted "re-created flow"
 check_audio "re-created flow"
-curl -fsS http://127.0.0.1:18130/metrics | grep -E '^mxl_srt_gateway_mxl_flow_reopens_total\{channel="tx1"\} [1-9]'
+curl -fsS http://127.0.0.1:18130/metrics | grep -E '^mxl_srt_gateway_mxl_flow_reopens_total\{channel="tx1",reason="recreated"\} [1-9]'
 
 # A new activation of the same flow opens it again.
 before="$(count '"event":"mxl_flow_open","channel":"tx1","reason":"activation"')"
@@ -142,6 +142,27 @@ sleep 1
 after="$(count '"event":"mxl_flow_open","channel":"tx1","reason":"activation"')"
 [ "$after" -gt "$before" ] || { echo "re-activation did not open the flow again" >&2; exit 1; }
 check_moving "re-activated"
+
+# A steady flow is never reopened: no mxl_flow_reopen line in 10 s.
+before="$(count '"event":"mxl_flow_reopen"')"
+sleep 10
+after="$(count '"event":"mxl_flow_reopen"')"
+[ "$after" = "$before" ] || { echo "a steady flow was reopened $((after - before)) times" >&2; exit 1; }
+echo "steady flow: no reopen in 10 s"
+
+# A paused writer (flows kept, heads still) costs exactly one stall reopen of video and audio,
+# and the egress follows the writer again when it resumes.
+before="$(count '"event":"mxl_flow_reopen","channel":"tx1","reason":"stalled"')"
+kill -USR1 "$WPID"
+sleep 4
+after="$(count '"event":"mxl_flow_reopen","channel":"tx1","reason":"stalled"')"
+[ "$((after - before))" = 1 ] || { echo "a paused writer gave $((after - before)) stall reopens, not 1" >&2; exit 1; }
+grep '"reason":"stalled"' "$WORK/gw.log" | tail -1 | grep -q "\"video\":\"$VIDEO\",\"audio\":\"$AUDIO\""
+curl -fsS http://127.0.0.1:18130/metrics | grep -E '^mxl_srt_gateway_mxl_flow_reopens_total\{channel="tx1",reason="stalled"\} 1$'
+kill -USR1 "$WPID"
+sleep 1.5
+check_moving "resumed writer"
+echo "paused writer: one stall reopen"
 
 # IS-05 off, the writer restarts meanwhile, IS-05 on: the deactivation released the readers and
 # the activation opens the new flow.

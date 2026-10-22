@@ -14,12 +14,13 @@
 namespace
 {
 std::atomic<bool> stopping{false};
+std::atomic<bool> paused{false};
 }
 
 // Writes a short v210 colour-bar flow plus a 1 kHz tone on channel 0.
 // Usage: mxl-srt-flow-writer <domain-dir> <domain-id> <flow-id> <seconds> [audio-flow-id]
 // The audio flow id defaults to <flow-id>-a. SIGTERM ends it early; the flows are deleted when it
-// exits.
+// exits. SIGUSR1 pauses or resumes the writing (the flows stay, their heads stand still).
 int main(int argc, char** argv)
 {
     if (argc < 5)
@@ -33,6 +34,7 @@ int main(int argc, char** argv)
     std::string const flowId = argv[3];
     int const seconds = std::atoi(argv[4]);
     std::signal(SIGTERM, [](int) { stopping.store(true); });
+    std::signal(SIGUSR1, [](int) { paused.store(!paused.load()); });
     std::string const audioFlowId = argc > 5 ? argv[5] : flowId + "-a";
     VideoFormat format;
     format.width = 1280;
@@ -48,6 +50,15 @@ int main(int argc, char** argv)
         int const total = std::max(1, seconds) * 25;
         for (int i = 0; i < total && !stopping.load(); ++i)
         {
+            if (paused.load())
+            {
+                while (paused.load() && !stopping.load())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                // Resumes at the current grain.
+                index = grainIndexNow(format.rate);
+            }
             // On the grain clock: a writer that runs slow shows as repeats on the egress.
             while (grainIndexNow(format.rate) < index)
             {

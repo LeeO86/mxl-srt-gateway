@@ -605,6 +605,18 @@ int MxlAudioReader::channels() const
     return channels_;
 }
 
+std::uint64_t MxlAudioReader::head() const
+{
+#if SRTGW_WITH_MXL
+    mxlFlowRuntimeInfo info{};
+    if (reader_ != nullptr && mxlFlowReaderGetRuntimeInfo(reader_, &info) == MXL_STATUS_OK)
+    {
+        return info.headIndex;
+    }
+#endif
+    return 0;
+}
+
 bool MxlAudioReader::read(std::uint64_t endIndex, int frames, std::uint64_t timeoutNs, std::vector<float>& interleaved)
 {
 #if SRTGW_WITH_MXL

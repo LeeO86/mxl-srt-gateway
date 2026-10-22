@@ -1844,10 +1844,33 @@ void EgressPipeline::run()
     std::string openReason = "activation";
     auto nextOpen = std::chrono::steady_clock::time_point{};
     auto nextCheck = std::chrono::steady_clock::time_point{};
-    std::uint64_t watchedHead = 0;
-    auto headMoved = std::chrono::steady_clock::now();
-    bool stallReopened = false;
-    std::uint64_t reopens = 0;
+    // A flow's head as last seen, when it last moved, and whether its stall was answered by a
+    // reopen already (once per stall). [0] video, [1] audio.
+    struct HeadWatch
+    {
+        std::uint64_t head = 0;
+        std::chrono::steady_clock::time_point moved;
+        bool reopened = false;
+        void reset(std::uint64_t now, std::chrono::steady_clock::time_point at)
+        {
+            head = now;
+            moved = at;
+        }
+        // True once the head has not moved for 1 s and no reopen answered it yet.
+        bool stalled(std::uint64_t now, std::chrono::steady_clock::time_point at)
+        {
+            if (now != head)
+            {
+                reset(now, at);
+                reopened = false;
+                return false;
+            }
+            return !reopened && at - moved >= std::chrono::seconds(1);
+        }
+    };
+    HeadWatch watch[2];
+    std::uint64_t reopensRecreated = 0;
+    std::uint64_t reopensStalled = 0;
     AVCodecContext* videoEnc = nullptr;
     // NVENC input frames on the GPU (primary CUDA context), when the converter is available.
     AVBufferRef* gpuFrames = nullptr;
@@ -2190,38 +2213,39 @@ void EgressPipeline::run()
             openRoute = routeKey;
             openReason = "activation";
             nextOpen = {};
+            watch[0].reopened = false;
+            watch[1].reopened = false;
         }
         if (!routeKey.empty())
         {
             auto const now = std::chrono::steady_clock::now();
             // A writer that restarts deletes its flow and creates it again under the same id; a
-            // reader keeps the deleted files and sees one frozen grain. Checked 4 times a second.
-            if (videoReader.isOpen() && now >= nextCheck)
+            // reader keeps the deleted files and sees one frozen grain. Video and audio are checked
+            // on their own, 4 times a second.
+            if ((videoReader.isOpen() || audioReader.isOpen()) && now >= nextCheck)
             {
                 nextCheck = now + std::chrono::milliseconds(250);
-                std::string why;
-                bool videoGone = videoReader.replaced();
-                bool const audioGone = audioReader.isOpen() && audioReader.replaced();
-                if (videoGone || audioGone)
+                bool videoGone = videoReader.isOpen() && videoReader.replaced();
+                bool audioGone = audioReader.isOpen() && audioReader.replaced();
+                std::string why = videoGone || audioGone ? "recreated" : "";
+                if (why.empty())
                 {
-                    why = "recreated";
-                }
-                else if (std::uint64_t const head = videoReader.head(); head != watchedHead)
-                {
-                    watchedHead = head;
-                    headMoved = now;
-                    stallReopened = false;
-                }
-                else if (!stallReopened && now - headMoved >= std::chrono::seconds(1))
-                {
-                    // Re-created under the same inode, or the writer stopped: open it again once.
-                    why = "stalled";
-                    videoGone = true;
-                    stallReopened = true;
+                    // A head that stands still for 1 s: a flow re-created under the same inode, or
+                    // a writer that paused. Both open flows are opened again, once per stall.
+                    bool const videoStalled = videoReader.isOpen() && watch[0].stalled(videoReader.head(), now);
+                    bool const audioStalled = audioReader.isOpen() && watch[1].stalled(audioReader.head(), now);
+                    if (videoStalled || audioStalled)
+                    {
+                        why = "stalled";
+                        videoGone = videoReader.isOpen();
+                        audioGone = audioReader.isOpen();
+                        watch[0].reopened = true;
+                        watch[1].reopened = true;
+                    }
                 }
                 if (!why.empty())
                 {
-                    ++reopens;
+                    ++(why == "recreated" ? reopensRecreated : reopensStalled);
                     log::warn("mxl_flow_reopen", {{"channel", config_.id}, {"reason", why}, {"video", videoGone ? videoRoute.flowId : ""},
                                                      {"audio", audioGone ? audioRoute.flowId : ""}});
                     sync.reset();
@@ -2251,12 +2275,12 @@ void EgressPipeline::run()
                 if (openDomain && !videoReader.isOpen() && videoReader.open(*openDomain, videoRoute.flowId))
                 {
                     opened = true;
-                    watchedHead = videoReader.head();
-                    headMoved = now;
+                    watch[0].reset(videoReader.head(), now);
                 }
                 if (openDomain && videoReader.isOpen() && wantAudio && !audioReader.isOpen() && audioReader.open(*openDomain, audioRoute.flowId))
                 {
                     opened = true;
+                    watch[1].reset(audioReader.head(), now);
                 }
                 if (opened)
                 {
@@ -2615,7 +2639,8 @@ void EgressPipeline::run()
         status.frames = frames;
         status.repeats = repeats;
         status.drops = drops;
-        status.flowReopens = reopens;
+        status.flowReopensRecreated = reopensRecreated;
+        status.flowReopensStalled = reopensStalled;
         status.encodeFps = frames / std::max(0.001, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
         status.encodeLatencyCount = status_.encodeLatencyCount;
         status.encodeLatencySum = status_.encodeLatencySum;
