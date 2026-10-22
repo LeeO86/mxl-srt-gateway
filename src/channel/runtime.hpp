@@ -55,6 +55,6 @@ private:
     std::map<std::string, Slot> slots_;
     std::map<std::string, FlowRoute> videoRoutes_;
     std::map<std::string, FlowRoute> audioRoutes_;
-    std::map<std::string, std::shared_ptr<MxlDomain>> inputs_;
+    std::uint64_t routeGeneration_ = 0;
 };
 } // namespace srtgw

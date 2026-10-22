@@ -386,16 +386,23 @@ bool MxlAudioWriter::write(std::uint64_t endIndex, float const* interleaved, int
 #endif
 }
 
+MxlVideoReader::~MxlVideoReader()
+{
+    close();
+}
+
 bool MxlVideoReader::open(MxlDomain& domain, std::string const& flowId)
 {
     close();
 #if SRTGW_WITH_MXL
     domain_ = &domain;
-    if (mxlCreateFlowReader(domain.instance(), flowId.c_str(), nullptr, &reader_) != MXL_STATUS_OK)
+    // The file before the reader maps it: a flow re-created in between shows as replaced.
+    if (!flowFileId(domain.path(), flowId, &file_) || mxlCreateFlowReader(domain.instance(), flowId.c_str(), nullptr, &reader_) != MXL_STATUS_OK)
     {
         reader_ = nullptr;
         return false;
     }
+    flowId_ = flowId;
     std::string def(4096, '\0');
     std::size_t size = def.size();
     if (mxlGetFlowDef(domain.instance(), flowId.c_str(), def.data(), &size) != MXL_STATUS_OK)
@@ -441,12 +448,23 @@ void MxlVideoReader::close()
     }
     reader_ = nullptr;
 #endif
+    invalid_ = false;
     open_ = false;
 }
 
 bool MxlVideoReader::isOpen() const
 {
     return open_;
+}
+
+bool MxlVideoReader::replaced() const
+{
+#if SRTGW_WITH_MXL
+    FlowFileId now;
+    return open_ && (invalid_ || !flowFileId(domain_->path(), flowId_, &now) || !(now == file_));
+#else
+    return false;
+#endif
 }
 
 std::uint64_t MxlVideoReader::head() const
@@ -483,7 +501,12 @@ bool MxlVideoReader::view(std::uint64_t index, std::uint64_t timeoutNs, std::uin
 #if SRTGW_WITH_MXL
     mxlGrainInfo info{};
     std::uint8_t* grain = nullptr;
-    if (mxlFlowReaderGetGrain(reader_, index, timeoutNs, &info, &grain) != MXL_STATUS_OK || grain == nullptr)
+    auto const status = mxlFlowReaderGetGrain(reader_, index, timeoutNs, &info, &grain);
+    if (status == MXL_ERR_FLOW_INVALID)
+    {
+        invalid_ = true;
+    }
+    if (status != MXL_STATUS_OK || grain == nullptr)
     {
         return false;
     }
@@ -514,16 +537,22 @@ mxlFlowReader MxlVideoReader::handle() const
 }
 #endif
 
+MxlAudioReader::~MxlAudioReader()
+{
+    close();
+}
+
 bool MxlAudioReader::open(MxlDomain& domain, std::string const& flowId)
 {
     close();
 #if SRTGW_WITH_MXL
     domain_ = &domain;
-    if (mxlCreateFlowReader(domain.instance(), flowId.c_str(), nullptr, &reader_) != MXL_STATUS_OK)
+    if (!flowFileId(domain.path(), flowId, &file_) || mxlCreateFlowReader(domain.instance(), flowId.c_str(), nullptr, &reader_) != MXL_STATUS_OK)
     {
         reader_ = nullptr;
         return false;
     }
+    flowId_ = flowId;
     mxlFlowConfigInfo info{};
     if (mxlFlowReaderGetConfigInfo(reader_, &info) == MXL_STATUS_OK)
     {
@@ -551,6 +580,7 @@ void MxlAudioReader::close()
     }
     reader_ = nullptr;
 #endif
+    invalid_ = false;
     open_ = false;
     channels_ = 0;
 }
@@ -558,6 +588,16 @@ void MxlAudioReader::close()
 bool MxlAudioReader::isOpen() const
 {
     return open_;
+}
+
+bool MxlAudioReader::replaced() const
+{
+#if SRTGW_WITH_MXL
+    FlowFileId now;
+    return open_ && (invalid_ || !flowFileId(domain_->path(), flowId_, &now) || !(now == file_));
+#else
+    return false;
+#endif
 }
 
 int MxlAudioReader::channels() const
@@ -580,7 +620,12 @@ bool MxlAudioReader::read(std::uint64_t endIndex, int frames, std::uint64_t time
         int const count = std::min(frames - done, static_cast<int>(limit));
         std::uint64_t const head = endIndex - static_cast<std::uint64_t>(frames - done) + static_cast<std::uint64_t>(count);
         mxlWrappedMultiBufferSlice slices{};
-        if (mxlFlowReaderGetSamples(reader_, head, static_cast<std::size_t>(count), timeoutNs, &slices) != MXL_STATUS_OK)
+        auto const status = mxlFlowReaderGetSamples(reader_, head, static_cast<std::size_t>(count), timeoutNs, &slices);
+        if (status == MXL_ERR_FLOW_INVALID)
+        {
+            invalid_ = true;
+        }
+        if (status != MXL_STATUS_OK)
         {
             return false;
         }

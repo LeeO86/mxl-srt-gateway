@@ -37,6 +37,8 @@ struct PipelineStatus
     std::uint64_t frames = 0;
     std::uint64_t repeats = 0;
     std::uint64_t drops = 0;
+    // Egress: readers opened again because their MXL flow was re-created (or stalled).
+    std::uint64_t flowReopens = 0;
     double driftPpm = 0;
     double fifoMs = 0;
     std::uint64_t decodeErrors = 0;
@@ -63,6 +65,8 @@ struct FlowRoute
     std::string domainId;
     std::string flowId;
     bool mirror = false;
+    // Counts activations: a new one opens the flow again even with the same flow id.
+    std::uint64_t generation = 0;
 };
 
 class IngestPipeline

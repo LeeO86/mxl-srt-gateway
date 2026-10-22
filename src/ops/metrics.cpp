@@ -69,6 +69,7 @@ std::string renderMetrics(ProcessMetrics const& metrics)
         counter(out, "video_frames_out_total", id, channel.videoFrames);
         counter(out, "framesync_repeats_total", id, channel.repeats);
         counter(out, "framesync_drops_total", id, channel.drops);
+        counter(out, "mxl_flow_reopens_total", id, channel.flowReopens);
         gauge(out, "audio_drift_ppm", id, channel.audioDriftPpm);
         gauge(out, "audio_fifo_ms", id, channel.audioFifoMs);
         counter(out, "decode_errors_total", id, channel.decodeErrors);

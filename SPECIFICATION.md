@@ -319,6 +319,17 @@ corporate firewall. Therefore:
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
+- A re-created flow (the writer restarted: same flow id, new files) is opened
+  again within about 1 s, without a channel restart: every 250 ms the egress
+  checks the flow's `data` file against the device/inode it opened, and MXL's
+  `MXL_ERR_FLOW_INVALID`; a head that has not moved for 1 s also reopens once
+  (a flow re-created under the same inode). Video and audio are checked on
+  their own; a missing flow is retried every 200 ms. Each activation (also of
+  the same flow id) and each channel start opens the flows in a new MXL
+  instance: MXL shares one reader per flow id within an instance, so a reader
+  left open elsewhere would hand back the deleted files. Logs:
+  `mxl_flow_open` (`reason` `activation`, `recreated`, `stalled`) and
+  `mxl_flow_reopen`; metric `mxl_flow_reopens_total`.
 
 ### 6.2 Format and encode
 
@@ -446,7 +457,8 @@ Per channel: `channel_state`, `srt_rtt_ms`, `srt_pkt_loss_total`,
 ingest from a packet's arrival to its picture, egress from a frame into the
 encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
-plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+`mxl_flow_reopens_total` (egress readers opened again because their flow was
+re-created or stalled, §6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,
@@ -511,6 +523,10 @@ Grafana dashboard in `deploy/grafana/`.
      or with a wrong `streamid` and logs the reason.
   7. NMOS: IS-05 activation of an egress receiver to a flow that does not exist
      yet → `waiting` → running when the flow appears.
+  8. A re-created flow (`tests/integration/reopen.sh`): the writer of the
+     egress's flows restarts (same ids, new files); video moves again and audio
+     is back within ~1 s, no mapping of the deleted files is left; a new
+     activation of the same flow and a channel restart open it fresh.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency

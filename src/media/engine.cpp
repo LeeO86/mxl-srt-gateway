@@ -1833,12 +1833,21 @@ void EgressPipeline::run()
     });
 
     auto const slateFrame = renderSlate(config_.target.width, config_.target.height, config_.label, true);
+    // Declared before the readers: a reader is released into its domain's instance.
+    std::shared_ptr<MxlDomain> openDomain;
     MxlVideoReader videoReader;
     MxlAudioReader audioReader;
-    std::shared_ptr<MxlDomain> openDomain;
-    std::string openVideo;
-    std::string openAudio;
+    // The activation the readers belong to (domain, flows, generations).
+    std::string openRoute;
     std::unique_ptr<MxlSync> sync;
+    // Why the next open happens, for its log line.
+    std::string openReason = "activation";
+    auto nextOpen = std::chrono::steady_clock::time_point{};
+    auto nextCheck = std::chrono::steady_clock::time_point{};
+    std::uint64_t watchedHead = 0;
+    auto headMoved = std::chrono::steady_clock::now();
+    bool stallReopened = false;
+    std::uint64_t reopens = 0;
     AVCodecContext* videoEnc = nullptr;
     // NVENC input frames on the GPU (primary CUDA context), when the converter is available.
     AVBufferRef* gpuFrames = nullptr;
@@ -2165,28 +2174,101 @@ void EgressPipeline::run()
         std::size_t pictureSize = slateFrame.size();
         VideoFormat source = config_.target;
         bool live = false;
-        if (videoRoute.active && !videoRoute.flowId.empty())
+        bool const wantAudio = audioRoute.active && !audioRoute.flowId.empty();
+        std::string const routeKey = videoRoute.active && !videoRoute.flowId.empty()
+                                         ? videoRoute.domainId + "/" + videoRoute.flowId + "#" + std::to_string(videoRoute.generation) + " " +
+                                               (wantAudio ? audioRoute.flowId + "#" + std::to_string(audioRoute.generation) : std::string())
+                                         : std::string();
+        if (routeKey != openRoute)
         {
-            if (videoRoute.flowId != openVideo)
+            // A new activation (also of the same flow) or the first one: a fresh MXL instance and
+            // fresh readers, nothing kept from before.
+            sync.reset();
+            videoReader.close();
+            audioReader.close();
+            openDomain.reset();
+            openRoute = routeKey;
+            openReason = "activation";
+            nextOpen = {};
+        }
+        if (!routeKey.empty())
+        {
+            auto const now = std::chrono::steady_clock::now();
+            // A writer that restarts deletes its flow and creates it again under the same id; a
+            // reader keeps the deleted files and sees one frozen grain. Checked 4 times a second.
+            if (videoReader.isOpen() && now >= nextCheck)
             {
-                bool mirror = false;
-                openDomain = domains_(videoRoute.domainId, &mirror);
-                videoReader.close();
-                audioReader.close();
-                sync.reset();
-                openVideo.clear();
-                openAudio.clear();
-                if (openDomain && videoReader.open(*openDomain, videoRoute.flowId))
+                nextCheck = now + std::chrono::milliseconds(250);
+                std::string why;
+                bool videoGone = videoReader.replaced();
+                bool const audioGone = audioReader.isOpen() && audioReader.replaced();
+                if (videoGone || audioGone)
                 {
-                    openVideo = videoRoute.flowId;
-                    source = videoReader.format();
-                    if (audioRoute.active && audioReader.open(*openDomain, audioRoute.flowId))
+                    why = "recreated";
+                }
+                else if (std::uint64_t const head = videoReader.head(); head != watchedHead)
+                {
+                    watchedHead = head;
+                    headMoved = now;
+                    stallReopened = false;
+                }
+                else if (!stallReopened && now - headMoved >= std::chrono::seconds(1))
+                {
+                    // Re-created under the same inode, or the writer stopped: open it again once.
+                    why = "stalled";
+                    videoGone = true;
+                    stallReopened = true;
+                }
+                if (!why.empty())
+                {
+                    ++reopens;
+                    log::warn("mxl_flow_reopen", {{"channel", config_.id}, {"reason", why}, {"video", videoGone ? videoRoute.flowId : ""},
+                                                     {"audio", audioGone ? audioRoute.flowId : ""}});
+                    sync.reset();
+                    if (videoGone)
                     {
-                        openAudio = audioRoute.flowId;
+                        videoReader.close();
+                    }
+                    if (audioGone)
+                    {
+                        audioReader.close();
+                    }
+                    openReason = why;
+                    nextOpen = {};
+                }
+            }
+            bool const needOpen = !videoReader.isOpen() || (wantAudio && !audioReader.isOpen());
+            if (needOpen && now >= nextOpen)
+            {
+                // Missing flows are retried 5 times a second.
+                nextOpen = now + std::chrono::milliseconds(200);
+                if (!openDomain)
+                {
+                    bool mirror = false;
+                    openDomain = domains_(videoRoute.domainId, &mirror);
+                }
+                bool opened = false;
+                if (openDomain && !videoReader.isOpen() && videoReader.open(*openDomain, videoRoute.flowId))
+                {
+                    opened = true;
+                    watchedHead = videoReader.head();
+                    headMoved = now;
+                }
+                if (openDomain && videoReader.isOpen() && wantAudio && !audioReader.isOpen() && audioReader.open(*openDomain, audioRoute.flowId))
+                {
+                    opened = true;
+                }
+                if (opened)
+                {
+                    sync.reset();
+                    if (audioReader.isOpen())
+                    {
                         sync = std::make_unique<MxlSync>(*openDomain);
                         sync->addVideo(videoReader);
                         sync->addAudio(audioReader);
                     }
+                    log::info("mxl_flow_open", {{"channel", config_.id}, {"reason", openReason}, {"video", videoRoute.flowId},
+                                                   {"audio", audioReader.isOpen() ? audioRoute.flowId : ""}});
                 }
             }
             if (videoReader.isOpen())
@@ -2533,6 +2615,7 @@ void EgressPipeline::run()
         status.frames = frames;
         status.repeats = repeats;
         status.drops = drops;
+        status.flowReopens = reopens;
         status.encodeFps = frames / std::max(0.001, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
         status.encodeLatencyCount = status_.encodeLatencyCount;
         status.encodeLatencySum = status_.encodeLatencySum;

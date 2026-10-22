@@ -125,6 +125,34 @@ TEST_CASE("output domain files are not overwritten and cleanup stays inside the 
     std::filesystem::remove_all(root);
 }
 
+TEST_CASE("a flow re-created under the same id has another data file")
+{
+    auto const root = std::filesystem::temp_directory_path() / "srtgw-flowfile-test";
+    std::filesystem::remove_all(root);
+    std::string const flow = "33333333-3333-4333-8333-333333333333";
+    auto const dir = root / (flow + ".mxl-flow");
+    FlowFileId first;
+    CHECK_FALSE(flowFileId(root.string(), flow, &first));
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "data") << "old";
+    REQUIRE(flowFileId(root.string(), flow, &first));
+    FlowFileId same;
+    REQUIRE(flowFileId(root.string(), flow, &same));
+    CHECK(same == first);
+    // What a restarted writer does: the old files go (a reader keeps its mapping), new ones come.
+    // The old file stays open here, as a reader's mapping would keep it, so its inode is not reused.
+    std::ifstream held(dir / "data");
+    std::filesystem::remove_all(dir);
+    FlowFileId gone;
+    CHECK_FALSE(flowFileId(root.string(), flow, &gone));
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "data") << "new";
+    FlowFileId second;
+    REQUIRE(flowFileId(root.string(), flow, &second));
+    CHECK_FALSE(second == first);
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("a matrix patch keeps the channel label and the per-tap gains")
 {
     auto original = channelFromJson("{\"id\":\"in1\",\"label\":\"Ingest 1\",\"direction\":\"ingest\"}", nullptr);
@@ -1126,6 +1154,7 @@ TEST_CASE("metrics render the channel set")
     channel.state = stateCode("running");
     channel.videoFrames = 10;
     channel.repeats = 2;
+    channel.flowReopens = 3;
     channel.decoder = "h264-cpu";
     channel.targetFormat = "1080p50";
     channel.encodeLatencyCount = 4;
@@ -1137,6 +1166,7 @@ TEST_CASE("metrics render the channel set")
     CHECK(text.find("mxl_srt_gateway_channel_state{channel=\"in1\"} 4") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_framesync_repeats_total{channel=\"in1\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_info{channel=\"in1\"") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\"} 3") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_delay_ms{channel=\"in1\"} 12.5") != std::string::npos);
     // No GPU gauges: reading them ran nvidia-smi (1.4.2).
     CHECK(text.find("nvdec_sessions") == std::string::npos);

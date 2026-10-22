@@ -21,6 +21,7 @@ struct ChannelMetrics
     std::uint64_t videoFrames = 0;
     std::uint64_t repeats = 0;
     std::uint64_t drops = 0;
+    std::uint64_t flowReopens = 0;
     double audioDriftPpm = 0;
     double audioFifoMs = 0;
     double codecDelayMs = 0;

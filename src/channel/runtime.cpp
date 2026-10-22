@@ -242,11 +242,7 @@ std::shared_ptr<MxlDomain> ChannelManager::openInput(std::string const& domainId
     {
         return nullptr;
     }
-    if (domainId == config.mxlOutputDomainId)
-    {
-        return output_;
-    }
-    std::string path = resolveDomainPath(config.mxlDomainScanPath, domainId);
+    std::string path = domainId == config.mxlOutputDomainId ? config.mxlOutputDomainDir : resolveDomainPath(config.mxlDomainScanPath, domainId);
     bool isMirror = false;
     for (auto const& domain : scanDomains(config.mxlDomainScanPath))
     {
@@ -264,17 +260,12 @@ std::shared_ptr<MxlDomain> ChannelManager::openInput(std::string const& domainId
     {
         return nullptr;
     }
-    std::lock_guard const lock{mu_};
-    auto const it = inputs_.find(path);
-    if (it != inputs_.end())
-    {
-        return it->second;
-    }
+    // A new MXL instance for each caller: MXL shares one reader per flow id within an instance,
+    // so a reader still open elsewhere in a shared instance would hand back the deleted files of
+    // a re-created flow.
     try
     {
-        auto domain = std::make_shared<MxlDomain>(path, domainId, config.historyDurationNs, false);
-        inputs_[path] = domain;
-        return domain;
+        return std::make_shared<MxlDomain>(path, domainId, config.historyDurationNs, false);
     }
     catch (std::exception const& ex)
     {
@@ -350,6 +341,7 @@ void ChannelManager::setRoute(std::string const& id, bool video, FlowRoute route
         }
     }
     std::lock_guard const lock{mu_};
+    route.generation = ++routeGeneration_;
     if (video)
     {
         videoRoutes_[id] = std::move(route);
@@ -522,6 +514,7 @@ ProcessMetrics ChannelManager::metrics() const
         item.videoFrames = status.frames;
         item.repeats = status.repeats;
         item.drops = status.drops;
+        item.flowReopens = status.flowReopens;
         item.audioDriftPpm = status.driftPpm;
         item.audioFifoMs = status.fifoMs;
         item.decodeErrors = status.decodeErrors;

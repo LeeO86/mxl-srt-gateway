@@ -85,5 +85,8 @@ jobs:
       - name: Integration
         run: SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 
+      - name: Re-created flow
+        run: tests/integration/reopen.sh ./build/mxl-srt-gateway
+
       - name: Shutdown
         run: tests/integration/shutdown.sh ./build/mxl-srt-gateway
