@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (planned 1.4.4)
+
+### Fixes
+
+- At start an ingest could fail with `video flow writer failed for <flow>` (state `error`; libmxl: `Failed to create flow: Could not open shared memory segment: No such file or directory`) when its output flow was left in the domain by the last run (platform, srt-remote's first 1.4.3 start: RX1 of 6 flows). The new writer finds the old, unlocked flow and opens it; the supervisor's garbage collection of the output domain, every 400 ms and also right after the channels are launched, deleted that flow between the writer finding it and locking it. This race was there since 1.0, not from 1.4.3's own MXL instances (egress readers never garbage-collect). Flow writers are now created under a lock that the garbage collection also takes, and a failed create is retried once after 100 ms (`mxl_flow_writer_retry`, warn). Measured with `tests/integration/startup.sh` (8 ingest and 2 egress channels, killed and started 50 times on the same domain): 1.4.3 32 of 50 starts failed; now 0 of 50, and no retry was needed.
+
+### Added
+
+- `tests/integration/startup.sh` (in CI).
+
 ## 1.4.3
 
 ### Fixes
