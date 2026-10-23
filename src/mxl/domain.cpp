@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <chrono>
+#include <thread>
 
 #if SRTGW_WITH_MXL
 #include <mxl/time.h>
@@ -194,12 +196,30 @@ std::string const& MxlDomain::id() const
 void MxlDomain::garbageCollect()
 {
 #if SRTGW_WITH_MXL
+    std::lock_guard const lock{flowsMu_};
     if (instance_ != nullptr)
     {
         mxlGarbageCollectFlows(instance_);
     }
 #endif
 }
+
+#if SRTGW_WITH_MXL
+mxlStatus MxlDomain::createFlowWriter(std::string const& flowId, std::string const& def, char const* options, mxlFlowWriter* writer, mxlFlowConfigInfo* info,
+    bool* created)
+{
+    std::lock_guard const lock{flowsMu_};
+    auto status = mxlCreateFlowWriter(instance_, def.c_str(), options, writer, info, created);
+    if (status != MXL_STATUS_OK)
+    {
+        // Another process may have removed the flow's files under it: once more.
+        log::warn("mxl_flow_writer_retry", {{"flow", flowId}, {"status", std::to_string(static_cast<int>(status))}});
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        status = mxlCreateFlowWriter(instance_, def.c_str(), options, writer, info, created);
+    }
+    return status;
+}
+#endif
 
 #if SRTGW_WITH_MXL
 mxlInstance MxlDomain::instance() const
@@ -217,7 +237,7 @@ MxlVideoWriter::MxlVideoWriter(MxlDomain& domain, std::string flowId, std::strin
     auto const def = videoFlowJson(flowId, label, group, format);
     bool created = false;
     mxlFlowConfigInfo info{};
-    auto const status = mxlCreateFlowWriter(domain.instance(), def.c_str(), "{\"maxCommitBatchSizeHint\":1}", &writer_, &info, &created);
+    auto const status = domain.createFlowWriter(flowId, def, "{\"maxCommitBatchSizeHint\":1}", &writer_, &info, &created);
     if (status != MXL_STATUS_OK)
     {
         throw std::runtime_error("video flow writer failed for " + flowId);
@@ -301,7 +321,7 @@ MxlAudioWriter::MxlAudioWriter(MxlDomain& domain, std::string flowId, std::strin
     auto const def = audioFlowJson(flowId, label, group, channels);
     bool created = false;
     mxlFlowConfigInfo info{};
-    auto const status = mxlCreateFlowWriter(domain.instance(), def.c_str(), "{\"maxCommitBatchSizeHint\":2000}", &writer_, &info, &created);
+    auto const status = domain.createFlowWriter(flowId, def, "{\"maxCommitBatchSizeHint\":2000}", &writer_, &info, &created);
     if (status != MXL_STATUS_OK)
     {
         throw std::runtime_error("audio flow writer failed for " + flowId);

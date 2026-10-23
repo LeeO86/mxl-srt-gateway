@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -61,11 +62,18 @@ public:
     void garbageCollect();
 #if SRTGW_WITH_MXL
     [[nodiscard]] mxlInstance instance() const;
+    // mxlCreateFlowWriter, never while garbageCollect runs, retried once. A flow left by a killed
+    // run (same id, unlocked) is opened again by its new writer; garbage collection between the
+    // writer finding it and locking it deleted it ("Could not open shared memory segment").
+    mxlStatus createFlowWriter(std::string const& flowId, std::string const& def, char const* options, mxlFlowWriter* writer, mxlFlowConfigInfo* info,
+        bool* created);
 #endif
 
 private:
     std::string path_;
     std::string id_;
+    // Held while a flow writer is created and while flows are garbage collected.
+    std::mutex flowsMu_;
 #if SRTGW_WITH_MXL
     mxlInstance instance_ = nullptr;
 #endif

@@ -446,6 +446,11 @@ configuration exits 78; global changes flagged `restart_required`.
 | `MXL_OUTPUT_DOMAIN_ID` | UUIDv5 from the seed | stable domain id. A different id already in `domain_def.json` is not overwritten |
 | `MXL_HISTORY_DURATION_MS` | `1000` | history duration when this process creates `options.json`. `SRTGW_HISTORY_DURATION_NS` is the previous name |
 | `MXL_CLEANUP_ON_EXIT` | `false` | SIGTERM deletes only this output domain directory |
+
+The supervisor garbage-collects the output domain every 400 ms (`mxlGarbageCollectFlows`:
+flows no writer holds). It never runs while a flow writer is being created: a flow left by
+a killed run (same id, unlocked) is reopened by its new writer, and a collection between
+the writer finding it and locking it would delete it under the writer.
 | `STATE_DIR` | `/config` | config persistence and IS-05 `routes.json` |
 | `SHUTDOWN_TIMEOUT_S` | `10` | SIGTERM budget. Exit code is 143 |
 | `DECODER` / `ENCODER` | `auto` | `auto`, `nvdec`/`nvenc`, `cpu` |
