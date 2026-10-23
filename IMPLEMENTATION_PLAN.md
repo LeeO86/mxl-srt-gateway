@@ -328,6 +328,12 @@ both.
     for the socket's life; an ingest listener lets a waiting caller replace a
     peer silent for 1 s only after the access checks. Tests:
     `tests/integration/reopen.sh` and `tests/integration/reconnect.sh`.
+16. **Flow writers and garbage collection (1.4.4).** The supervisor's
+    `mxlGarbageCollectFlows` on the output domain could delete a flow left by
+    a killed run while its new writer was reopening it (libmxl publishes by
+    rename, then opens the existing flow and locks it). Writers are created
+    under a mutex that the collection takes too; a failed create is retried
+    once. Test: `tests/integration/startup.sh`.
 
 ## MXL calls that matter
 

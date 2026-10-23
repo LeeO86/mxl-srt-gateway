@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (planned 1.4.4)
+## 1.4.4
 
 ### Fixes
 
@@ -9,6 +9,7 @@
 ### Added
 
 - `tests/integration/startup.sh` (in CI).
+- The Compose and Kubernetes examples use the `1.4.4` image.
 
 ## 1.4.3
 
