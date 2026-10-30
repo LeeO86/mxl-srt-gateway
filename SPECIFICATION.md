@@ -247,14 +247,23 @@ https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
   - after that, the resampler plays the audio faster or slower by error / 2 s,
     at most 0.5 % (`swr_set_compensation`), so drift and the jitter of a decoder
     that falls behind are corrected without a click;
-  - a mean error beyond 100 ms (a jump in the source timestamps, a long stall)
-    is stepped again, and the alignment starts over;
+  - a mean error beyond `av_resync_ms` (per ingest channel, default 40,
+    40–1000; a jump in the source timestamps, a long stall, a source restart)
+    is stepped again at once, and the alignment starts over;
   - the audio is held as late as the latest audio of those grains arrived for
     its due time, plus 10 ms: a rise is inserted at once and the video waits
     as long (up to 80 ms, the first track's hold); when less would do, the hold
     shrinks by at most 0.5 ms per 25 grains. A source that sends its audio in
     bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little
-    later, in lip sync, rather than with gaps;
+    later, in lip sync, rather than with gaps. A rise or a fall of the hold by
+    more than `av_resync_ms` is made only when two such windows in a row ask
+    for it, then at once (the step removes the audio a dropped hold delayed):
+    one late batch (the audio a sender's muxer kept back while its source
+    restarted) is not held, and a hold no longer needed does not linger;
+  - each of those steps once aligned, each hold rise beyond `av_resync_ms`, and
+    each step of the video mapping is a resync: log `av_resync` (`channel`,
+    `essence`, `track`, `jump_ms`, + later), metrics `av_resyncs_total` and
+    `av_resync_jump_ms` (§9), channel status `av_resyncs`;
   - a gap in the source's audio timestamps (a sender that skipped grains, lost
     packets) is filled with silence where it is, so the queued audio keeps its
     times; audio that is missing is no reason to hold.
@@ -483,7 +492,8 @@ encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 (info gauge with decoder/encoder, source and target format), `failover_active`,
 `mxl_flow_reopens_total` (label `reason` `recreated` or `stalled`: egress
 readers opened again because their flow was re-created or its head stalled,
-§6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+§6.1), `av_resyncs_total` and `av_resync_jump_ms` (label `essence` `video` or
+`audio`: ingest re-anchors, §5.4, and the last one's size in ms), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,
@@ -560,6 +570,11 @@ Grafana dashboard in `deploy/grafana/`.
      with the writer restarted in between, and a channel restart open it fresh.
      A steady flow is not reopened in 10 s; a paused writer (flows kept)
      costs exactly one stall reopen of video and audio.
+  9. Lip sync after a source restart (`tests/integration/avsync.sh`, marks
+     measured by `mxl-srt-avsync-check` on the ingest's MXL output): the MXL
+     writer behind an egress → SRT → ingest loop restarts, and an ffmpeg
+     sender restarts with a new PTS base; 3 s after either the AV offset is
+     back at its value before (within 25 ms and 80 ms).
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency

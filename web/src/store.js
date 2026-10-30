@@ -224,6 +224,7 @@ function blankChannel(direction) {
     hold_ms: 500,
     loss_mode: "slate",
     audio_offset_ms: 0,
+    av_resync_ms: 40,
     decoder: "",
     encoder: "",
     egress: {
