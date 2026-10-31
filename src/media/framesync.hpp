@@ -106,6 +106,24 @@ struct PtsMapper
     [[nodiscard]] std::int64_t add(std::int64_t sampleNs);
 };
 
+// Ingest: how long after its mapped time + sync_latency_ms the synchroniser shows a frame, on
+// the output grain grid. A frame is shown at the first grain at or after that time, so the delay
+// is the phase of the mapping against the grid, anywhere in [0, a grain) and constant for a
+// steady source; the audio is lined up with it (it assumed half a grain: an AV error of up to
+// half a grain, e.g. -5 ms at 50p on a loop). Smoothed over about 20 frames; a change beyond
+// `snapNs` (the mapping stepped) is taken at once.
+struct VideoPhase
+{
+    std::int64_t snapNs = 5000000;
+    bool valid = false;
+    double phaseNs = 0;
+
+    // Each newly shown frame: output grain time - video hold - sync latency - its mapped time.
+    void add(std::int64_t delayNs, std::int64_t grainNs);
+    // The phase, or half a grain before the first frame.
+    [[nodiscard]] std::int64_t value(std::int64_t grainNs) const;
+};
+
 // Silence (48 kHz samples) to queue before decoded audio that starts `gapNs` after the queued audio
 // ends: a gap in the source timestamps (lost or skipped frames) then keeps the queued samples on
 // their times. Below 2 ms it is rounding; beyond 1 s it is a jump, which the aligner steps.

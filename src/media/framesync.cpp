@@ -1,6 +1,7 @@
 #include "media/framesync.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace srtgw
 {
@@ -185,6 +186,23 @@ std::int64_t PtsMapper::add(std::int64_t sampleNs)
     beyond = 0;
     offsetNs += std::clamp(error, -slewNs, slewNs);
     return 0;
+}
+
+void VideoPhase::add(std::int64_t delayNs, std::int64_t grainNs)
+{
+    double const sample = static_cast<double>(std::clamp<std::int64_t>(delayNs, 0, grainNs));
+    if (!valid || std::fabs(sample - phaseNs) > static_cast<double>(snapNs))
+    {
+        phaseNs = sample;
+        valid = true;
+        return;
+    }
+    phaseNs += (sample - phaseNs) * 0.05;
+}
+
+std::int64_t VideoPhase::value(std::int64_t grainNs) const
+{
+    return valid ? static_cast<std::int64_t>(std::llround(phaseNs)) : grainNs / 2;
 }
 
 std::int64_t gapSamples(std::int64_t gapNs)

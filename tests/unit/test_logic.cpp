@@ -963,6 +963,33 @@ TEST_CASE("timestamp mapping through a PTS discontinuity, a source restart and a
     CHECK(gapSamples(1800 * ms) == 0);
 }
 
+TEST_CASE("the audio follows the phase the video frames are shown with on the output grid")
+{
+    std::int64_t const ms = 1000000;
+    std::int64_t const grain = 20 * ms;
+    VideoPhase phase;
+    // Before a frame was shown: half a grain, as before.
+    CHECK(phase.value(grain) == 10 * ms);
+    // A loop at 50p: the frames are shown 15 ms after their mapped time + sync latency, every
+    // time (1.4.5 lined the audio up at 10 ms: AV -5 ms). Small jitter is smoothed.
+    phase.add(15 * ms, grain);
+    CHECK(phase.value(grain) == 15 * ms);
+    for (int i = 0; i < 200; ++i)
+    {
+        phase.add((i % 2 == 0 ? 14 : 16) * ms, grain);
+    }
+    CHECK(std::llabs(phase.value(grain) - 15 * ms) < ms / 4);
+    // One odd frame moves it by a twentieth.
+    phase.add(19 * ms, grain);
+    CHECK(phase.value(grain) == doctest::Approx(15.2 * ms).epsilon(0.01));
+    // The mapping stepped (another phase for good): taken at once.
+    phase.add(3 * ms, grain);
+    CHECK(phase.value(grain) == 3 * ms);
+    // Out of the grain (a held frame): clamped to it (0 here), then smoothed like any other.
+    phase.add(-40 * ms, grain);
+    CHECK(phase.value(grain) == 2850000);
+}
+
 TEST_CASE("a gap in the source audio is filled with silence, rounding and jumps are not")
 {
     CHECK(gapSamples(1000000) == 0);

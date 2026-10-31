@@ -164,7 +164,8 @@ CPU at 8 × 1080p50 on the lab host and kept p95 encode latency at ≤ 10 ms
 
 Ingest audio follows the video: each track is queued with its source
 timestamps and plays `sync_latency_ms` after the time its PTS maps to, like the
-video frames. The mapping follows the earliest video frames (the minimum over
+video frames, plus the part of a grain the video frames wait for the output
+grid (measured on the frames shown, about 20 frames' mean). The mapping follows the earliest video frames (the minimum over
 50 frames), so frames that come late (a sender's bursts, a busy decoder) use up
 `sync_latency_ms` instead of moving it; it moves by at most 1 ms per window for
 a drifting source and steps only when it is off by more than

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- An ingest played its audio up to half a grain early or late against its video, for good: −4.6…−5.1 ms on the platform's loop (x264 + AAC 15 Mbit/s, SRT latency 120, sync latency 120; audio index shift 475.0–475.4 ms, video 480; 72 of 200 analyzer events at the warn limit). It lined each audio queue up at its mapped time + `sync_latency_ms` + half a grain, "like the frame the synchroniser shows". But the synchroniser shows a frame on the first output grain at or after its mapped time + `sync_latency_ms`, so the frame waits a fixed part of a grain: the phase of the PTS mapping (which follows the earliest frames) against the grain grid, anywhere from 0 to a grain and the same for as long as the mapping holds. The audio now waits that phase, measured on each newly shown frame (`VideoPhase`, smoothed over about 20 frames, a change beyond 5 ms taken at once). It was not the AAC encoder delay (FFmpeg's encoder and decoder carry its 1024 samples of priming in the timestamps) nor the aligner's margin. Measured with `tests/integration/avsync.sh` (MXL writer → egress H.264 + AAC → SRT → ingest, AV offset of the ingest's MXL output): 720p25 loop 1.4.5 +6.1…+8.2 ms (phase 12.5–13 ms, so +20 − 13), now +0.4…+1.1 ms; 720p50 loop 1.4.5 +6.2…+6.7 ms, now +0.6…+0.8 ms; with only the egress or only the ingest at 50p 1.4.5 −3.5…−4.6 ms, now +0.5…+1.0 ms.
+
+### Added
+
+- `tests/integration/avsync.sh` also checks the loop's own AV offset (within 2 ms of 0) and a 720p50 loop; `mxl-srt-flow-writer` writes 720p50 with `SRTGW_WRITER_RATE=50`.
+
+### Notes for the platform
+
+- After the update the loop's AV offset should read about 0 ms (within about 1 ms) instead of −5 ms; a channel with an `audio_offset_ms` set to correct that should have it set back to 0.
+
 ## 1.4.5
 
 ### Fixes
