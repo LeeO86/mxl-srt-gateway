@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.5
 
 ### Fixes
 
@@ -20,6 +20,7 @@
 
 - An audio error beyond 40 ms is now stepped (a short gap or silence) instead of slewed. A source whose audio arrives in bursts that vary by more than that may see more `av_resync` lines; raise `av_resync_ms` for it.
 - New dashboard inputs: `mxl_srt_gateway_av_resyncs_total{channel,essence}`, `mxl_srt_gateway_av_resync_jump_ms{channel,essence}`, log event `av_resync`.
+- The Compose and Kubernetes examples use the `1.4.5` image.
 
 ## 1.4.4
 
