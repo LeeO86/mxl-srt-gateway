@@ -84,6 +84,9 @@ public:
     ~IngestPipeline();
     void start();
     void stop();
+    // Tells the threads to end without waiting for them (stop() then joins): a shutdown asks
+    // every channel first, so they end in parallel.
+    void requestStop();
     [[nodiscard]] PipelineStatus status() const;
 
 private:
@@ -120,6 +123,9 @@ public:
     ~EgressPipeline();
     void start();
     void stop();
+    // Tells the threads to end without waiting for them (stop() then joins): a shutdown asks
+    // every channel first, so they end in parallel.
+    void requestStop();
     [[nodiscard]] PipelineStatus status() const;
 
 private:

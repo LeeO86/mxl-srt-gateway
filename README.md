@@ -40,6 +40,7 @@ SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
+tests/integration/stop.sh ./build/mxl-srt-gateway
 tests/integration/avsync.sh ./build/mxl-srt-gateway
 ```
 
@@ -61,7 +62,11 @@ Environment overrides the JSON file (`SRTGW_CONFIG_FILE`), which overrides the
 defaults. Unknown environment variables are ignored. Invalid configuration
 exits **78**. A port that cannot be bound, or a domain that cannot be created,
 exits **75**. SIGTERM exits **143**. A clean run that is stopped another way
-exits **0**.
+exits **0**. On SIGTERM every channel is asked to stop at once and they end in
+parallel: reconnect backoffs and a caller's connect wake within 20 ms, so a
+gateway with any number of channels, connected or not, exits in under a second
+on the lab host (`tests/integration/stop.sh`; the Kubernetes examples give 30 s,
+`terminationGracePeriodSeconds`).
 
 State the process writes (the config file when `SRTGW_CONFIG_FILE` points
 there, and `routes.json` for IS-05 activations) lives under `STATE_DIR`

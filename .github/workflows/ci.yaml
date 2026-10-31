@@ -99,3 +99,6 @@ jobs:
 
       - name: Shutdown
         run: tests/integration/shutdown.sh ./build/mxl-srt-gateway
+
+      - name: Stop with many channels
+        run: tests/integration/stop.sh ./build/mxl-srt-gateway

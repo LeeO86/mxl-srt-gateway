@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- A gateway with two or more egress channels did not stop on SIGTERM: it hung until Kubernetes killed it after the grace period (30 s in the examples; on the lab host still running after 90 s, also in 1.4.5). The channels were stopped one after another while holding the channel manager's lock, and an egress asks `route()`, which takes that lock, on every grain: the second egress blocked there while the first was being stopped, and was never told to stop. The channels are now taken out under the lock and stopped outside it, all asked at once so they end in parallel; a channel removed or changed at run time is stopped outside the lock too (the same deadlock could hit an egress there). Also in the stop path:
+  - `interruptSrt()` releases the listeners' epolls; a listener waiting in `acceptOne` then polled the released epoll again and again (about 20 000 "EID INVALID" lines) until its channel was stopped. It now gives up on any epoll error but the timeout;
+  - the reconnect backoff of egress and ingest links (up to 10 s) slept through a stop; it now wakes within 20 ms;
+  - a caller's `srt_connect` blocked for the connect timeout (3 s) when its far end was not there; it now connects without blocking and gives up on a stop. A wrong passphrase on a caller is now logged as `srt_rejected` with `reason` `passphrase` (from SRT's reject reason; 1.4.5 logged only `srt_connect_failed`, "connection rejected");
+  - after a complete shutdown the process ends without the exit-time destructors: with Ubuntu's libsrt 1.5.3 (gnutls, as in CI) SRT's own static teardown crashed, so a SIGTERM exited 139 instead of 143 once any SRT channel had run (the image's SRT 1.5.4 exited 143). `srt_cleanup()` now runs explicitly at the end of the shutdown.
+  Measured with `tests/integration/stop.sh` (3 egress and 3 ingest channels: connected, an idle listener, callers backing off; SIGTERM after 3, 9 and 16 s): 1.4.5 still running 5 s after the SIGTERM in the first round; now exit 143 in 0.3–0.4 s each round, at most 2 "EID INVALID" lines (a wait in flight when its epoll went).
+
+### Added
+
+- `tests/integration/stop.sh` (in CI).
+
 ## 1.4.5
 
 ### Fixes
