@@ -35,6 +35,17 @@ namespace srtgw
 {
 namespace
 {
+// Sleeps `ms`, but returns within 20 ms once `stop` is set or SRT is interrupted (shutdown): a
+// reconnect backoff of up to 10 s held a channel's stop that long.
+void sleepUnlessStopped(std::atomic<bool> const& stop, int ms)
+{
+    auto const until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    while (!stop.load() && !srtInterrupted() && std::chrono::steady_clock::now() < until)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
 struct Once
 {
     Once()
@@ -653,6 +664,11 @@ void IngestPipeline::start()
     clock_ = std::thread([this] { runClock(); });
 }
 
+void IngestPipeline::requestStop()
+{
+    stop_.store(true);
+}
+
 void IngestPipeline::stop()
 {
     stop_.store(true);
@@ -689,7 +705,7 @@ void IngestPipeline::runLink(bool backup)
     {
         if (!link.establish(stop_, limiter))
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(stop_.load() ? 1 : backoffMs));
+            sleepUnlessStopped(stop_, backoffMs);
             backoffMs = std::min(10000, backoffMs * 2);
             continue;
         }
@@ -1883,6 +1899,11 @@ void EgressPipeline::start()
     thread_ = std::thread([this] { run(); });
 }
 
+void EgressPipeline::requestStop()
+{
+    stop_.store(true);
+}
+
 void EgressPipeline::stop()
 {
     stop_.store(true);
@@ -1931,13 +1952,13 @@ void EgressPipeline::run()
     AttemptLimiter limiter;
     std::thread connector([&] {
         int backoff = 1000;
-        while (!stop_.load())
+        while (!stop_.load() && !srtInterrupted())
         {
             if (!primary.connected())
             {
                 if (!primary.establish(stop_, limiter))
                 {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
+                    sleepUnlessStopped(stop_, backoff);
                     backoff = std::min(10000, backoff * 2);
                 }
                 else
@@ -1948,7 +1969,7 @@ void EgressPipeline::run()
             else
             {
                 primary.rejectPending(limiter);
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                sleepUnlessStopped(stop_, 200);
             }
             if (config_.backup.enabled && !duplicate.connected() && !stop_.load())
             {
