@@ -41,6 +41,7 @@ tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
 tests/integration/avsync.sh ./build/mxl-srt-gateway
+tests/integration/egress_gaps.sh ./build/mxl-srt-gateway
 ```
 
 Pins, recorded in `IMPLEMENTATION_PLAN.md`:
@@ -102,7 +103,9 @@ set, the Query API lists this node. `/livez` is 200 while the process is up.
 state, SRT statistics, frames, frame sync, audio, decode and encode rates,
 `codec_delay_ms`, `encode_latency_seconds`, `codec_info`, `failover_active`,
 `mxl_flow_reopens_total` (label `reason`: `recreated`, `stalled`),
-`av_resyncs_total` and `av_resync_jump_ms` (label `essence`: `video`, `audio`); per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
+`av_resyncs_total` and `av_resync_jump_ms` (label `essence`: `video`, `audio`),
+`egress_repeated_frames_total`, `egress_slate_frames_total`,
+`egress_audio_silent_grains_total`; per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
 DCGM exporter has GPU memory and NVENC/NVDEC load. Whether a channel's video
 runs on NVDEC or NVENC is its status's `video_codec_hw` (`nvdec`, `nvenc`,
 `none`) and the `codec_opened` log line of each decoder or encoder open, with
@@ -209,7 +212,21 @@ Egress reads each output grain's video and audio `egress.read_offset_grains`
 (default 2) source frames before its time, so that the writer has finished
 them, and stamps each encoded audio frame with the time of its first sample.
 Its timestamps follow the output grain's TAI time: a loop that falls more than
-4 grains behind continues at the current grain and leaves a gap.
+4 grains behind continues at the current grain and leaves a gap. It waits for a
+source grain at most until half a grain after the output grain's tick (the
+frame's send deadline; the rest is the encoder's), and for its audio at most
+until the next tick, so a source that commits late cannot make it fall behind.
+A source grain that is missing, invalid or not there by then repeats the last
+good frame (`egress_repeated_frames_total`); only when no good grain came for
+longer than the channel's `hold_ms` (default 500, as on ingest; 0: the slate at
+once) is the slate sent (`egress_slate_frames_total`, which also counts the
+slate while a route waits for its flow). 500 ms is long enough that a source
+under load (one late or missing grain in five) never shows the slate, short
+enough that a lost source shows it within half a second, and shorter than the
+1 s grain history the repeated frame is copied from. Audio the open flow does
+not have by its deadline is sent as silence
+(`egress_audio_silent_grains_total`): repeating audio would be heard, and the
+samples keep their times.
 A writer that restarts (a multiviewer, a player) deletes its flow and creates
 it again under the same id. The egress checks its video and audio flows on
 their own, 4 times a second, and opens a flow again when its data file is gone

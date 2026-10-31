@@ -40,6 +40,12 @@ struct PipelineStatus
     // Egress: readers opened again because their MXL flow was re-created, or its head stalled.
     std::uint64_t flowReopensRecreated = 0;
     std::uint64_t flowReopensStalled = 0;
+    // Egress: output frames that repeated the last good source frame (its grain missing, invalid
+    // or late), frames sent as the slate while routed (no good grain for longer than hold_ms, or
+    // none yet), and grains whose audio the open flow did not have in time (sent as silence).
+    std::uint64_t repeatedFrames = 0;
+    std::uint64_t slateFrames = 0;
+    std::uint64_t audioSilentGrains = 0;
     // Ingest: re-anchors of the video mapping (a step of its PTS offset) and of the audio
     // (a step against the video, or a hold beyond av_resync_ms), and the last one's size (ms,
     // + later, - earlier).

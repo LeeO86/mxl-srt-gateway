@@ -450,6 +450,10 @@ const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
             <label for="ts-off">MXL read offset in grains</label>
             <input id="ts-off" v-model.number="d.egress.read_offset_grains" type="number" min="0" max="50" :class="cls('egress.read_offset_grains')" />
           </div>
+          <div>
+            <label for="ts-hold">Repeat the last frame for ms</label>
+            <input id="ts-hold" v-model.number="d.hold_ms" type="number" min="0" max="10000" step="50" :class="cls('hold_ms')" />
+          </div>
         </div>
         <div v-else class="fields grid">
           <div>

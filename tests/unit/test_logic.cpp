@@ -963,6 +963,42 @@ TEST_CASE("timestamp mapping through a PTS discontinuity, a source restart and a
     CHECK(gapSamples(1800 * ms) == 0);
 }
 
+TEST_CASE("egress repeats the last good frame for a missing grain and sends the slate only on a loss")
+{
+    std::int64_t const ms = 1000000;
+    std::int64_t const grain = 20 * ms;
+    EgressHold hold;
+    hold.holdNs = 500 * ms;
+    // Nothing good yet (start, a new route): the slate.
+    CHECK(hold.decide(false, 0) == EgressPicture::Slate);
+    CHECK(hold.decide(true, grain) == EgressPicture::Source);
+    // An invalid, skipped or late grain: the last good frame again, not the slate (1.4.5 sent the
+    // slate, which broke an analyzer's flash windows behind SRT).
+    CHECK(hold.decide(false, 2 * grain) == EgressPicture::Repeat);
+    CHECK(hold.decide(true, 3 * grain) == EgressPicture::Source);
+    // A source that misses every other grain never shows the slate.
+    for (int i = 4; i < 100; ++i)
+    {
+        CHECK(hold.decide(i % 2 == 0, i * grain) == (i % 2 == 0 ? EgressPicture::Source : EgressPicture::Repeat));
+    }
+    // A real loss: repeats up to hold_ms after the last good grain, then the slate.
+    std::int64_t const last = 98 * grain;
+    CHECK(hold.decide(false, last + 500 * ms) == EgressPicture::Repeat);
+    CHECK(hold.decide(false, last + 520 * ms) == EgressPicture::Slate);
+    CHECK(hold.decide(false, last + 2000 * ms) == EgressPicture::Slate);
+    // Recovery: the first good grain is sent at once, and the next miss repeats it.
+    CHECK(hold.decide(true, last + 2020 * ms) == EgressPicture::Source);
+    CHECK(hold.decide(false, last + 2040 * ms) == EgressPicture::Repeat);
+    // A new route: nothing of the old flow is repeated.
+    hold.reset();
+    CHECK(hold.decide(false, last + 2060 * ms) == EgressPicture::Slate);
+    // hold_ms 0: every miss is the slate, as before.
+    EgressHold none;
+    none.holdNs = 0;
+    CHECK(none.decide(true, 0) == EgressPicture::Source);
+    CHECK(none.decide(false, grain) == EgressPicture::Slate);
+}
+
 TEST_CASE("a gap in the source audio is filled with silence, rounding and jumps are not")
 {
     CHECK(gapSamples(1000000) == 0);
@@ -1296,6 +1332,8 @@ TEST_CASE("metrics render the channel set")
     channel.flowReopensStalled = 1;
     channel.avResyncsAudio = 2;
     channel.avResyncJumpAudioMs = -310;
+    channel.repeatedFrames = 7;
+    channel.slateFrames = 2;
     channel.decoder = "h264-cpu";
     channel.targetFormat = "1080p50";
     channel.encodeLatencyCount = 4;
@@ -1313,6 +1351,9 @@ TEST_CASE("metrics render the channel set")
     CHECK(text.find("mxl_srt_gateway_av_resyncs_total{channel=\"in1\",essence=\"audio\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_av_resyncs_total{channel=\"in1\",essence=\"video\"} 0") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_av_resync_jump_ms{channel=\"in1\",essence=\"audio\"} -310") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_egress_repeated_frames_total{channel=\"in1\"} 7") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_egress_slate_frames_total{channel=\"in1\"} 2") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_egress_audio_silent_grains_total{channel=\"in1\"} 0") != std::string::npos);
     // No GPU gauges: reading them ran nvidia-smi (1.4.2).
     CHECK(text.find("nvdec_sessions") == std::string::npos);
     CHECK(text.find("nvenc_sessions") == std::string::npos);

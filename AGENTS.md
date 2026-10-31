@@ -15,6 +15,7 @@ tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
 tests/integration/avsync.sh ./build/mxl-srt-gateway
+tests/integration/egress_gaps.sh ./build/mxl-srt-gateway
 ```
 
 Lint is `-Wall -Wextra` on the compile. A clean build is the lint signal.
