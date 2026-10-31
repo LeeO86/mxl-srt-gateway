@@ -91,6 +91,9 @@ jobs:
       - name: SRT reconnect
         run: tests/integration/reconnect.sh ./build/mxl-srt-gateway
 
+      - name: Lip sync after a source restart
+        run: tests/integration/avsync.sh ./build/mxl-srt-gateway
+
       - name: Start-up with stale flows
         run: tests/integration/startup.sh ./build/mxl-srt-gateway 20
 

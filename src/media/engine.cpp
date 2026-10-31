@@ -591,6 +591,9 @@ struct IngestPipeline::Shared
     bool haveOffset = false;
     // Steps of that offset (PtsMapper) the writer has not moved the audio queues by yet.
     std::int64_t mapStepNs = 0;
+    // Those steps: how many, and the last one (ns).
+    std::uint64_t videoResyncs = 0;
+    std::int64_t videoJumpNs = 0;
     // Video packet arrival to its picture being ready (decoder, adaptation), smoothed.
     double codecDelayMs = 0;
     std::string decoder;
@@ -1080,6 +1083,7 @@ void IngestPipeline::runIo()
             shared_->audio[static_cast<std::size_t>(dec.index)].channels = fmt->streams[index]->codecpar->ch_layout.nb_channels;
             shared_->audio[static_cast<std::size_t>(dec.index)].ptsValid = false;
             shared_->audio[static_cast<std::size_t>(dec.index)].aligner = AudioAligner{};
+            shared_->audio[static_cast<std::size_t>(dec.index)].aligner.stepNs = static_cast<std::int64_t>(config_.avResyncMs) * 1000000LL;
             shared_->haveOffset = false;
         }
 
@@ -1274,6 +1278,10 @@ void IngestPipeline::runIo()
                                                         std::shared_ptr<AVFrame const> yuv) {
                             auto const now = static_cast<std::int64_t>(taiNowNs());
                             std::int64_t const step = mapper.add(now - ptsNs);
+                            if (step != 0)
+                            {
+                                log::warn("av_resync", {{"channel", config_.id}, {"essence", "video"}, {"jump_ms", std::to_string(step / 1000000)}});
+                            }
                             double delayMs = -1;
                             if (auto const arrived = arrivals.find(ptsNs); arrived != arrivals.end())
                             {
@@ -1299,6 +1307,11 @@ void IngestPipeline::runIo()
                                 std::lock_guard const lock{shared_->mediaMu};
                                 shared_->ptsOffsetNs = mapper.offsetNs;
                                 shared_->mapStepNs += step;
+                                if (step != 0)
+                                {
+                                    ++shared_->videoResyncs;
+                                    shared_->videoJumpNs = step;
+                                }
                                 shared_->haveOffset = true;
                                 if (delayMs >= 0)
                                 {
@@ -1519,6 +1532,11 @@ void IngestPipeline::runClock()
     // the first 10 s after one, which remove the error it left.
     double drift = 0;
     std::int64_t alignedSamples = 0;
+    // Audio re-anchors (AudioAligner::resynced) of all tracks, and the last one's size (ns).
+    std::uint64_t audioResyncs = 0;
+    std::int64_t audioJumpNs = 0;
+    std::uint64_t videoResyncs = 0;
+    std::int64_t videoJumpNs = 0;
     // MXL interlaced flows: one grain per field (see the video write below).
     bool const fieldGrains = config_.target.interlaced;
     bool const topFieldFirst = config_.target.fieldOrder != "bff";
@@ -1600,6 +1618,13 @@ void IngestPipeline::runClock()
                 targetNs -= audioOffsetNs;
                 std::int64_t const correction = live.aligner.add(targetNs - headNs, live.lateNs);
                 live.lateNs = INT64_MIN;
+                if (live.aligner.resynced)
+                {
+                    ++audioResyncs;
+                    audioJumpNs = live.aligner.jumpNs;
+                    log::warn("av_resync", {{"channel", config_.id}, {"essence", "audio"}, {"track", std::to_string(q + 1)},
+                                               {"jump_ms", std::to_string(live.aligner.jumpNs / 1000000)}});
+                }
                 if (correction > 0)
                 {
                     auto const drop = static_cast<std::ptrdiff_t>(std::min(correction, queued) * live.channels);
@@ -1619,6 +1644,8 @@ void IngestPipeline::runClock()
                 }
             }
             audioCopy = shared_->audio;
+            videoResyncs = shared_->videoResyncs;
+            videoJumpNs = shared_->videoJumpNs;
             videoHoldNs = shared_->audio.empty() ? 0 : std::min<std::int64_t>(shared_->audio[0].aligner.holdNs, 80000000);
             codecDelayMs = shared_->codecDelayMs;
             auto const now = monoNowMs();
@@ -1814,6 +1841,10 @@ void IngestPipeline::runClock()
         status.drops = drops;
         status.driftPpm = drift;
         status.fifoMs = fifoMs;
+        status.avResyncsVideo = videoResyncs;
+        status.avResyncsAudio = audioResyncs;
+        status.avResyncJumpVideoMs = static_cast<double>(videoJumpNs) / 1e6;
+        status.avResyncJumpAudioMs = static_cast<double>(audioJumpNs) / 1e6;
         status.decodeFps = decodeFps;
         status.codecDelayMs = codecDelayMs;
         status.failover = failover;
@@ -2644,12 +2675,15 @@ void EgressPipeline::run()
         av_frame_free(&encoded);
         av_frame_free(&raw);
 
-        if (audioReader.isOpen())
+        // Every grain feeds the audio encoders, silence while no audio flow is open (a source that
+        // restarts, no audio route): without audio packets FFmpeg's interleaver holds the video
+        // back (up to 10 s) and the muxer keeps the last audio, which then arrives that late.
+        if (!audioEnc.empty())
         {
             int const sampleCount = samplesPerGrain(static_cast<std::int64_t>(index), config_.target.rate.num, config_.target.rate.den);
             // The samples of the video's time, `offset` source frames back: the newest ones are
             // still being written.
-            Rate const rate = videoReader.format().rate;
+            Rate const rate = videoReader.isOpen() ? videoReader.format().rate : config_.target.rate;
             std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), config_.target.rate.num, config_.target.rate.den) -
                                                                  sampleIndexAtGrain(offset, rate.num, rate.den));
             std::vector<float> interleaved;

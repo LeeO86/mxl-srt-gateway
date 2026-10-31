@@ -40,6 +40,7 @@ SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
+tests/integration/avsync.sh ./build/mxl-srt-gateway
 ```
 
 Pins, recorded in `IMPLEMENTATION_PLAN.md`:
@@ -100,7 +101,8 @@ set, the Query API lists this node. `/livez` is 200 while the process is up.
 `/metrics` is Prometheus text with the `mxl_srt_gateway_` prefix: per channel
 state, SRT statistics, frames, frame sync, audio, decode and encode rates,
 `codec_delay_ms`, `encode_latency_seconds`, `codec_info`, `failover_active`,
-`mxl_flow_reopens_total` (label `reason`: `recreated`, `stalled`); per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
+`mxl_flow_reopens_total` (label `reason`: `recreated`, `stalled`),
+`av_resyncs_total` and `av_resync_jump_ms` (label `essence`: `video`, `audio`); per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
 DCGM exporter has GPU memory and NVENC/NVDEC load. Whether a channel's video
 runs on NVDEC or NVENC is its status's `video_codec_hw` (`nvdec`, `nvenc`,
 `none`) and the `codec_opened` log line of each decoder or encoder open, with
@@ -171,17 +173,26 @@ with it. A gap in the source audio's timestamps is filled with silence where it
 is. At the start the gateway drops or inserts samples until the error
 is within 20 ms. After that the resampler plays the audio up to 0.5 % faster or
 slower, so a drifting source or a decoder that falls behind does not click. An
-error beyond 100 ms (a timestamp jump, a long stall) is stepped again. Audio
-that arrives in bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer
-does that) is held back as late as it arrived, and released slowly, and the
-video waits as long (up to 80 ms): a little later, in lip sync, rather than
-with gaps. `audio_offset_ms` (−1000 to 1000,
+error beyond `av_resync_ms` (default 40, 40–1000; a timestamp jump, a long
+stall, a source restart) is stepped again at once. Audio that arrives in bursts
+later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer does that) is held back as
+late as it arrived, and released slowly, and the video waits as long (up to
+80 ms): a little later, in lip sync, rather than with gaps. A rise or fall of
+that hold by more than `av_resync_ms` is made only when two windows of 25
+grains in a row ask for it, and then at once: one late batch of audio (what a
+sender's muxer kept back while its source restarted) is not held, and a hold
+that is no longer needed is dropped instead of being released over minutes.
+Each such re-anchor, and each step of the video mapping, logs `av_resync`
+(`channel`, `essence` `video` or `audio`, `track`, `jump_ms`: + later,
+− earlier) and counts in `av_resyncs_total{channel,essence}`;
+`av_resync_jump_ms{channel,essence}` is the last one's size, and the channel
+status has `av_resyncs` (`video`, `audio`). `audio_offset_ms` (−1000 to 1000,
 +: later) moves an ingest channel's audio against its video, for a source that
 is out of lip sync; egress ignores it. In the channel status,
 `audio_fifo_ms` is the queued audio and `audio_drift_ppm` the first track's
 resampling correction, averaged over about a minute from 10 s after the
-alignment (+: the source audio runs fast against TAI). The thresholds are
-fixed (`SPECIFICATION.md` §5.4).
+alignment (+: the source audio runs fast against TAI). The other thresholds
+are fixed (`SPECIFICATION.md` §5.4).
 
 `codec_delay_ms` (channel status and `mxl_srt_gateway_codec_delay_ms`) is the
 video codec delay, smoothed over about 20 frames: on ingest from a packet's
@@ -207,7 +218,9 @@ has not moved for 1 s it opens both again, once per stall. Each such reopen
 logs `mxl_flow_reopen` (`reason` `recreated` or `stalled`) and counts in
 `mxl_flow_reopens_total{channel,reason}`, each open logs `mxl_flow_open`. Each activation
 (also of the same flow) and each channel start opens the flows in a new MXL
-instance, so no reader of a deleted flow is kept.
+instance, so no reader of a deleted flow is kept. While no audio flow is open
+(a source restarting, no audio route) the egress encodes silence on the grain
+clock, so its audio timestamps go on and the stream never stalls.
 Each audio track goes to its encoder in that encoder's sample format (SMPTE
 302M: 24 bit, MP2: 16 bit). A track whose encoder does not open is left out of
 the TS and logs `audio_encoder_failed`. An egress channel whose document has

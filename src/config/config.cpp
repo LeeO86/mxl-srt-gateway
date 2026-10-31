@@ -470,6 +470,10 @@ void validateConfig(Config const& config)
         {
             error += channel.id + " audio_offset_ms must be -1000 to 1000; ";
         }
+        if (channel.avResyncMs < 40 || channel.avResyncMs > 1000)
+        {
+            error += channel.id + " av_resync_ms must be 40-1000; ";
+        }
         if (channel.audioOutputs.empty())
         {
             error += channel.id + " needs an audio output; ";
@@ -825,6 +829,7 @@ std::string channelToJson(ChannelConfig const& channel, bool includeSecrets)
     obj["hold_ms"] = picojson::value(static_cast<double>(channel.holdMs));
     obj["loss_mode"] = picojson::value(channel.lossMode);
     obj["audio_offset_ms"] = picojson::value(channel.audioOffsetMs);
+    obj["av_resync_ms"] = picojson::value(static_cast<double>(channel.avResyncMs));
     picojson::array outputs;
     for (auto const& output : channel.audioOutputs)
     {
@@ -925,6 +930,7 @@ ChannelConfig channelFromJson(std::string const& text, ChannelConfig const* prev
     channel.holdMs = json::fieldInt(root, "hold_ms", channel.holdMs);
     channel.lossMode = json::fieldString(root, "loss_mode", channel.lossMode);
     channel.audioOffsetMs = json::fieldDouble(root, "audio_offset_ms", channel.audioOffsetMs);
+    channel.avResyncMs = json::fieldInt(root, "av_resync_ms", channel.avResyncMs);
     if (json::has(root, "audio_outputs"))
     {
         channel.audioOutputs.clear();

@@ -11,6 +11,7 @@
     {"type": "timeseries", "title": "Frame sync", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "targets": [{"expr": "rate(mxl_srt_gateway_framesync_repeats_total[1m])"}, {"expr": "rate(mxl_srt_gateway_framesync_drops_total[1m])"}]},
     {"type": "timeseries", "title": "Audio FIFO", "gridPos": {"h": 8, "w": 8, "x": 0, "y": 20}, "targets": [{"expr": "mxl_srt_gateway_audio_fifo_ms"}]},
     {"type": "timeseries", "title": "Encode latency", "gridPos": {"h": 8, "w": 8, "x": 8, "y": 20}, "targets": [{"expr": "histogram_quantile(0.95, sum(rate(mxl_srt_gateway_encode_latency_seconds_bucket[5m])) by (le, channel))"}]},
-    {"type": "timeseries", "title": "MXL flow reopens", "gridPos": {"h": 8, "w": 8, "x": 16, "y": 20}, "targets": [{"expr": "increase(mxl_srt_gateway_mxl_flow_reopens_total[5m])", "legendFormat": "{{channel}} {{reason}}"}]}
+    {"type": "timeseries", "title": "MXL flow reopens", "gridPos": {"h": 8, "w": 8, "x": 16, "y": 20}, "targets": [{"expr": "increase(mxl_srt_gateway_mxl_flow_reopens_total[5m])", "legendFormat": "{{channel}} {{reason}}"}]},
+    {"type": "timeseries", "title": "AV resyncs", "gridPos": {"h": 8, "w": 8, "x": 0, "y": 28}, "targets": [{"expr": "increase(mxl_srt_gateway_av_resyncs_total[5m])", "legendFormat": "{{channel}} {{essence}}"}]}
   ]
 }

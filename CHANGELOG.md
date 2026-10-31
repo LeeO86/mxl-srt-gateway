@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- After the source of an egress → SRT → ingest loop restarted (an MXL generator whose flows were re-created, timestamps going on on TAI), the ingest played its audio about 1.8 s behind the video, and that error shrank by only about 60 ms a minute (platform: `audio_index_shift` 2362 ms against 476 ms before, video 560 against 480; back after about 35 minutes). Causes:
+  - ingest: the audio aligner holds the audio as late as the latest audio of a 25-grain window arrived, so that a sender's bursts play late rather than with gaps, and releases that hold by at most 0.5 ms per window (0.1 % at 50p, the slew rate seen). One late batch was enough to raise the hold to 1.2–1.8 s, and the aligner then steered the audio to it (the video waits at most 80 ms of it: the 560 ms). Now a rise or a fall of the hold by more than `av_resync_ms` is made only when two windows in a row ask for it, then at once: one late batch is not held, and a hold no longer needed is dropped at once instead of over minutes;
+  - ingest: an audio error up to 100 ms was slewed at 0.5 % (up to 20 s); the step threshold is now the channel's `av_resync_ms` (default 40 ms, 40–1000), so an error beyond it (a restart left the queue 93 ms short in the lab) is stepped at once and only drift is slewed;
+  - egress: while its audio flow was not open (the source restarting, about 1.5 s), it sent no audio at all. FFmpeg's interleaver then held the video back (the SRT stream stopped), and the TS muxer kept the last audio packet until the audio came back, so that audio arrived that much late — the batch above. The egress now encodes silence while no audio flow is open, as the specification says, so its audio timestamps go on and the stream does not stall.
+  Measured with `tests/integration/avsync.sh` (720p25, H.264 + AAC, CPU codecs, the MXL writer behind the egress stopped for 1.5 s and started again; AV offset of the ingest's MXL output): 1.4.4 +6 ms before, then +1165, +1190, +1215, +1240 ms at 6, 11, 16 and 21 s after the restart (still rising toward the hold; in a container run of the 1.4.4 image the audio queue went from 180 ms to 1530 ms and stayed there); now +6 ms before and +5.9, +5.3, +7.1, +5.9 ms from 2.5 s after. Each fix alone also passes: the ingest fix with the 1.4.4 egress one resync (`jump_ms` −102) and +9.0 ms at 5.9 s; the egress fix with the 1.4.4 ingest +6.3 ms at 4.8 s. An ffmpeg sender restarted with a new PTS base was and stays within the about ±40 ms its own offset varies by from one connection to the next.
+
+### Added
+
+- Ingest channel setting `av_resync_ms` (default 40, 40–1000), also in the UI ("Resync audio beyond ms").
+- Log line `av_resync` (warn; `channel`, `essence` `video` or `audio`, `track`, `jump_ms`: + later, − earlier) for each re-anchor of the audio and each step of the video's PTS mapping. Metrics `mxl_srt_gateway_av_resyncs_total{channel,essence}` and `mxl_srt_gateway_av_resync_jump_ms{channel,essence}` (the last one's size); the channel status has `av_resyncs` (`video`, `audio`). Grafana panel "AV resyncs".
+- `tests/integration/avsync.sh` (in CI), with the tool `mxl-srt-avsync-check` (AV marks on an MXL video and audio flow); `mxl-srt-flow-writer` takes `marks` as a sixth argument (a white frame and a 100 ms tone every 5 s of TAI).
+
+### Notes for the platform
+
+- An audio error beyond 40 ms is now stepped (a short gap or silence) instead of slewed. A source whose audio arrives in bursts that vary by more than that may see more `av_resync` lines; raise `av_resync_ms` for it.
+- New dashboard inputs: `mxl_srt_gateway_av_resyncs_total{channel,essence}`, `mxl_srt_gateway_av_resync_jump_ms{channel,essence}`, log event `av_resync`.
+
 ## 1.4.4
 
 ### Fixes

@@ -49,11 +49,18 @@ private:
 //   `maxSpeed`) so the error is gone in about `horizonNs`, without a click; only a mean beyond
 //   `stepNs` (a jump in the source timestamps, a long stall) is stepped again, and the alignment
 //   starts over.
+// - `stepNs` also bounds the hold: a rise beyond it is held only when the next window needs it
+//   too (one late batch, such as the audio a sender's muxer kept back over a stall of its
+//   source, is not), and a hold more than `stepNs` above what two windows in a row need drops
+//   to it at once (the step then removes the audio it delayed) instead of being released slowly.
+// A step once aligned, or a held rise beyond `stepNs`, is a resync: `resynced` is set for that
+// call and `jumpNs` is how far it moved the audio (+ later, - earlier).
 struct AudioAligner
 {
     int window = 25;
     std::int64_t toleranceNs = 20000000;
-    std::int64_t stepNs = 100000000;
+    // av_resync_ms.
+    std::int64_t stepNs = 40000000;
     std::int64_t horizonNs = 2000000000;
     std::int64_t marginNs = 10000000;
     std::int64_t releaseNs = 500000;
@@ -64,8 +71,13 @@ struct AudioAligner
     std::int64_t holdNs = 0;
     int count = 0;
     bool aligned = false;
+    // The last window asked for a rise (or a drop) of the hold beyond stepNs that was not made.
+    bool rising = false;
+    bool falling = false;
     // How much faster than nominal the resampler plays the audio (< 0: slower).
     double speed = 0;
+    bool resynced = false;
+    std::int64_t jumpNs = 0;
 
     // Samples (48 kHz) to drop from (> 0), or silence to insert at (< 0), the queue's head now.
     [[nodiscard]] std::int64_t add(std::int64_t errorNs, std::int64_t lateNs);

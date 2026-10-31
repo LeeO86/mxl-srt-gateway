@@ -433,6 +433,12 @@ TEST_CASE("sync latency and audio offset stay within their ranges")
     channel.syncLatencyMs = 120;
     channel.audioOffsetMs = 1000.5;
     CHECK_THROWS_AS(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}), ConfigError);
+    channel.audioOffsetMs = 0;
+    CHECK(channel.avResyncMs == 40);
+    channel.avResyncMs = 1000;
+    CHECK(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}).config.channels.front().avResyncMs == 1000);
+    channel.avResyncMs = 39;
+    CHECK_THROWS_AS(loadFromSources({}, "[" + channelToJson(channel, true) + "]", {}), ConfigError);
 }
 
 TEST_CASE("an audio slice that wraps the ring is read from both fragments")
@@ -730,10 +736,10 @@ TEST_CASE("audio aligner corrects small errors by speed, large ones by a step")
         CHECK(aligner.add((4 + jitter) * ms, onTime) == 0);
     }
     CHECK(aligner.speed == doctest::Approx(0.002));
-    // Up to the step threshold the speed is clamped to 0.5 %, nothing is stepped.
-    CHECK(window(60 * ms) == 0);
+    // Up to the step threshold (av_resync_ms, 40) the speed is clamped to 0.5 %, nothing is stepped.
+    CHECK(window(30 * ms) == 0);
     CHECK(aligner.speed == doctest::Approx(0.005));
-    CHECK(window(-100 * ms) == 0);
+    CHECK(window(-40 * ms) == 0);
     CHECK(aligner.speed == doctest::Approx(-0.005));
     // Beyond it (a jump in the source timestamps): a step, the speed back to nominal, and the
     // alignment starts over.
@@ -783,7 +789,7 @@ TEST_CASE("audio aligner keeps the queue from running dry")
     }
     for (int grain = 0; grain < early.window; ++grain)
     {
-        CHECK(early.add(-60 * ms, grain % 6 == 5 ? -60 * ms : -160 * ms) == 0);
+        CHECK(early.add(-35 * ms, grain % 6 == 5 ? -35 * ms : -135 * ms) == 0);
     }
     CHECK(early.holdNs == 0);
     CHECK(early.speed == doctest::Approx(-0.005));
@@ -823,6 +829,138 @@ TEST_CASE("the PTS mapping follows the earliest frames and steps only for a last
     CHECK(mapper.offsetNs == 1101 * ms);
     CHECK(window(1001, {0, 0, 0, 0}) == 0);
     CHECK(window(1001, {0, 0, 0, 0}) == -100 * ms);
+}
+
+TEST_CASE("audio aligner holds no one-off late batch and drops a hold that is no longer needed")
+{
+    std::int64_t const ms = 1000000;
+    AudioAligner aligner;
+    // Each grain: the queue error, and how late the audio that arrived came (INT64_MIN: none).
+    auto window = [&](std::int64_t errorNs, std::int64_t lateNs) {
+        std::int64_t moved = 0;
+        for (int grain = 0; grain < aligner.window; ++grain)
+        {
+            moved += aligner.add(errorNs, grain == aligner.window - 1 ? lateNs : INT64_MIN);
+        }
+        return moved;
+    };
+    CHECK(window(0, -100 * ms) == 0);
+    REQUIRE(aligner.aligned);
+    // A source restart behind an egress: the audio its muxer kept over the stall arrives 1.2 s
+    // late, once. 1.4.4 held all audio 1.21 s later and released it by 0.5 ms per window (half an
+    // hour of lip sync off); now nothing is held and nothing moves.
+    CHECK(window(0, 1200 * ms) == 0);
+    CHECK(aligner.holdNs == 0);
+    CHECK_FALSE(aligner.resynced);
+    CHECK(window(0, -100 * ms) == 0);
+    CHECK(aligner.holdNs == 0);
+    // A source that now sends its audio 300 ms late for good: held from the second window, as a
+    // resync (the silence inserted, the audio 310 ms later).
+    CHECK(window(0, 300 * ms) == 0);
+    CHECK(aligner.holdNs == 0);
+    CHECK(window(0, 300 * ms) == -310 * 48);
+    CHECK(aligner.holdNs == 310 * ms);
+    CHECK(aligner.resynced);
+    CHECK(aligner.jumpNs == 310 * ms);
+    // Bursts that need 210 ms in every other window do not make the hold pump.
+    for (int i = 0; i < 4; ++i)
+    {
+        // At most the 0.5 ms released in the window before comes back.
+        CHECK(window(310 * ms, (i % 2 == 0 ? 200 : 300) * ms) >= -24);
+        CHECK_FALSE(aligner.resynced);
+    }
+    CHECK(aligner.holdNs >= 309 * ms);
+    // On time again for two windows: the hold drops at once and the step removes the 310 ms it
+    // had delayed the audio by (1.4.4: 0.5 ms per window, about 5 minutes at 50p).
+    CHECK(window(310 * ms, -100 * ms) == 0);
+    CHECK(aligner.holdNs > 300 * ms);
+    CHECK(window(310 * ms, -100 * ms) == 310 * 48);
+    CHECK(aligner.holdNs == 0);
+    CHECK(aligner.resynced);
+    CHECK(aligner.jumpNs == -310 * ms);
+    // Missing audio (no arrival) is no reason to drop the hold either.
+    AudioAligner held;
+    held.holdNs = 200 * ms;
+    held.aligned = true;
+    for (int grain = 0; grain < held.window; ++grain)
+    {
+        CHECK(held.add(200 * ms, INT64_MIN) == 0);
+    }
+    CHECK(held.holdNs == 199500000);
+}
+
+TEST_CASE("timestamp mapping through a PTS discontinuity, a source restart and an audio PTS step")
+{
+    std::int64_t const ms = 1000000;
+    std::int64_t const s = 1000 * ms;
+    // Video: TAI - PTS of each frame. A sender that restarts on the same connection with a new
+    // PTS base (no discontinuity flag): the offset steps once two windows agree, by the jump.
+    PtsMapper mapper;
+    std::int64_t step = 0;
+    for (int frame = 0; frame < 100; ++frame)
+    {
+        step += mapper.add(5 * s + (frame % 3) * ms);
+    }
+    CHECK(step == 0);
+    CHECK(mapper.offsetNs == 5 * s);
+    // The new base is 37 s lower: TAI - PTS is 37 s higher (and the first frames come late).
+    for (int frame = 0; frame < 100; ++frame)
+    {
+        step += mapper.add(42 * s + (frame < 10 ? 80 * ms : 0));
+    }
+    CHECK(step == 37 * s);
+    CHECK(mapper.offsetNs == 42 * s);
+    // A new base later than the old one: the same, in the other direction.
+    step = 0;
+    for (int frame = 0; frame < 100; ++frame)
+    {
+        step += mapper.add(2 * s);
+    }
+    CHECK(step == -40 * s);
+    // Audio: the queue follows the video mapping (the writer moves it by each step), so what the
+    // aligner sees of a source restart is a jump of its error. An audio PTS that steps against
+    // the video by more than av_resync_ms (40 ms) is re-anchored within one window.
+    AudioAligner aligner;
+    auto window = [&](std::int64_t errorNs) {
+        std::int64_t moved = 0;
+        for (int grain = 0; grain < aligner.window; ++grain)
+        {
+            moved += aligner.add(errorNs, INT64_MIN);
+        }
+        return moved;
+    };
+    CHECK(window(0) == 0);
+    REQUIRE(aligner.aligned);
+    // The audio PTS stepped 1.8 s back: its samples are 1.8 s older than their due time.
+    CHECK(window(1800 * ms) == 1800 * 48);
+    CHECK(aligner.resynced);
+    CHECK(aligner.jumpNs == -1800 * ms);
+    CHECK(window(0) == 0);
+    CHECK(aligner.aligned);
+    CHECK_FALSE(aligner.resynced);
+    // 60 ms forward (1.5 frames at 25p): silence in front of it at once.
+    CHECK(window(-60 * ms) == -60 * 48);
+    CHECK(aligner.jumpNs == 60 * ms);
+    CHECK(window(0) == 0);
+    // Drift-sized errors are slewed, never stepped.
+    CHECK(window(25 * ms) == 0);
+    CHECK_FALSE(aligner.resynced);
+    CHECK(aligner.speed == doctest::Approx(0.005));
+    // A larger threshold (av_resync_ms 200) slews 60 ms instead.
+    AudioAligner lenient;
+    lenient.stepNs = 200 * ms;
+    for (int grain = 0; grain < lenient.window; ++grain)
+    {
+        CHECK(lenient.add(0, INT64_MIN) == 0);
+    }
+    for (int grain = 0; grain < lenient.window; ++grain)
+    {
+        CHECK(lenient.add(-60 * ms, INT64_MIN) == 0);
+    }
+    CHECK(lenient.speed == doctest::Approx(-0.005));
+    // A gap in the audio PTS up to 1 s is filled with silence; beyond it the aligner steps.
+    CHECK(gapSamples(800 * ms) == 800 * 48);
+    CHECK(gapSamples(1800 * ms) == 0);
 }
 
 TEST_CASE("a gap in the source audio is filled with silence, rounding and jumps are not")
@@ -1156,6 +1294,8 @@ TEST_CASE("metrics render the channel set")
     channel.repeats = 2;
     channel.flowReopensRecreated = 3;
     channel.flowReopensStalled = 1;
+    channel.avResyncsAudio = 2;
+    channel.avResyncJumpAudioMs = -310;
     channel.decoder = "h264-cpu";
     channel.targetFormat = "1080p50";
     channel.encodeLatencyCount = 4;
@@ -1170,6 +1310,9 @@ TEST_CASE("metrics render the channel set")
     CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\",reason=\"recreated\"} 3") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_mxl_flow_reopens_total{channel=\"in1\",reason=\"stalled\"} 1") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_codec_delay_ms{channel=\"in1\"} 12.5") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_av_resyncs_total{channel=\"in1\",essence=\"audio\"} 2") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_av_resyncs_total{channel=\"in1\",essence=\"video\"} 0") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_av_resync_jump_ms{channel=\"in1\",essence=\"audio\"} -310") != std::string::npos);
     // No GPU gauges: reading them ran nvidia-smi (1.4.2).
     CHECK(text.find("nvdec_sessions") == std::string::npos);
     CHECK(text.find("nvenc_sessions") == std::string::npos);

@@ -425,7 +425,8 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << "\",\"peer\":\"" << jsonEscape(status.peer) << "\",\"source_format\":\"" << jsonEscape(status.sourceFormat) << "\",\"target_format\":\""
         << jsonEscape(status.targetFormat.empty() ? channel.target.label() : status.targetFormat) << "\",\"decoder\":\"" << jsonEscape(status.decoder)
         << "\",\"encoder\":\"" << jsonEscape(status.encoder) << "\",\"video_codec_hw\":\"" << videoCodecHw(status.decoder, status.encoder) << "\",\"frames\":" << status.frames << ",\"repeats\":" << status.repeats << ",\"drops\":" << status.drops
-        << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
+        << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"av_resyncs\":{\"video\":" << status.avResyncsVideo
+        << ",\"audio\":" << status.avResyncsAudio << "}" << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
         << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
         << ",\"loss\":" << status.srt.pktLoss << ",\"retrans\":" << status.srt.pktRetrans << ",\"drop\":" << status.srt.pktDrop
@@ -516,6 +517,10 @@ ProcessMetrics ChannelManager::metrics() const
         item.drops = status.drops;
         item.flowReopensRecreated = status.flowReopensRecreated;
         item.flowReopensStalled = status.flowReopensStalled;
+        item.avResyncsVideo = status.avResyncsVideo;
+        item.avResyncsAudio = status.avResyncsAudio;
+        item.avResyncJumpVideoMs = status.avResyncJumpVideoMs;
+        item.avResyncJumpAudioMs = status.avResyncJumpAudioMs;
         item.audioDriftPpm = status.driftPpm;
         item.audioFifoMs = status.fifoMs;
         item.decodeErrors = status.decodeErrors;

@@ -23,6 +23,10 @@ struct ChannelMetrics
     std::uint64_t drops = 0;
     std::uint64_t flowReopensRecreated = 0;
     std::uint64_t flowReopensStalled = 0;
+    std::uint64_t avResyncsVideo = 0;
+    std::uint64_t avResyncsAudio = 0;
+    double avResyncJumpVideoMs = 0;
+    double avResyncJumpAudioMs = 0;
     double audioDriftPpm = 0;
     double audioFifoMs = 0;
     double codecDelayMs = 0;

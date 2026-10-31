@@ -171,6 +171,7 @@ const problems = computed(() => {
   if (egress.value && x.egress.codec === "hevc" && x.target.scan === "interlaced") out.push("HEVC cannot be interlaced.");
   if (!(x.sync_latency_ms >= 0 && x.sync_latency_ms <= 2000)) out.push("The sync latency must be 0–2000 ms.");
   if (!(x.audio_offset_ms >= -1000 && x.audio_offset_ms <= 1000)) out.push("The audio offset must be −1000 to 1000 ms.");
+  if (!(x.av_resync_ms >= 40 && x.av_resync_ms <= 1000)) out.push("The AV resync threshold must be 40–1000 ms.");
   return out;
 });
 
@@ -466,6 +467,10 @@ const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
           <div>
             <label for="fs-aoff">Audio offset in ms (+: later)</label>
             <input id="fs-aoff" v-model.number="d.audio_offset_ms" type="number" min="-1000" max="1000" step="1" :class="cls('audio_offset_ms')" />
+          </div>
+          <div>
+            <label for="fs-resync">Resync audio beyond ms</label>
+            <input id="fs-resync" v-model.number="d.av_resync_ms" type="number" min="40" max="1000" step="10" :class="cls('av_resync_ms')" />
           </div>
         </div>
         <p class="note">

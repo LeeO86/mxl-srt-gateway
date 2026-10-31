@@ -96,6 +96,9 @@ struct ChannelConfig
     int holdMs = 500;
     std::string lossMode = "slate";
     double audioOffsetMs = 0.0;
+    // Ingest: an audio error beyond this (against the video's timeline) is re-anchored at once
+    // instead of slewed (SPECIFICATION.md §5.4).
+    int avResyncMs = 40;
     std::vector<AudioOutput> audioOutputs;
     std::string decoder;
     std::string encoder;

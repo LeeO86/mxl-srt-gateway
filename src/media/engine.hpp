@@ -40,6 +40,13 @@ struct PipelineStatus
     // Egress: readers opened again because their MXL flow was re-created, or its head stalled.
     std::uint64_t flowReopensRecreated = 0;
     std::uint64_t flowReopensStalled = 0;
+    // Ingest: re-anchors of the video mapping (a step of its PTS offset) and of the audio
+    // (a step against the video, or a hold beyond av_resync_ms), and the last one's size (ms,
+    // + later, - earlier).
+    std::uint64_t avResyncsVideo = 0;
+    std::uint64_t avResyncsAudio = 0;
+    double avResyncJumpVideoMs = 0;
+    double avResyncJumpAudioMs = 0;
     double driftPpm = 0;
     double fifoMs = 0;
     std::uint64_t decodeErrors = 0;

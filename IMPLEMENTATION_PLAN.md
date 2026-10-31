@@ -118,7 +118,9 @@ both.
    - once aligned, it sets a speed of mean / 2 s, at most ±0.5 %; the IO
      thread passes it to `swr_set_compensation` with every decoded frame
      (over 2^20 output samples, so it never runs out between frames);
-   - a mean beyond 100 ms is stepped again and the alignment starts over;
+   - a mean beyond `av_resync_ms` (40 ms by default; 100 ms fixed before
+     the unreleased fix of item 17) is stepped again and the alignment starts
+     over;
    - the error is taken against a hold (`holdNs`): per grain, error minus
      headroom (queued audio beyond the grain) is how much later the audio
      would have to be for the queue to just last; the hold rises at once to
@@ -334,6 +336,17 @@ both.
     rename, then opens the existing flow and locks it). Writers are created
     under a mutex that the collection takes too; a failed create is retried
     once. Test: `tests/integration/startup.sh`.
+17. **Lip sync after a source restart (unreleased).** A source behind an
+    egress restarted; the egress sent no audio while the audio flow was not
+    open, FFmpeg's interleaver held the video and the TS muxer the last audio,
+    which then reached the ingest about 1.2–1.8 s late in one batch. The
+    ingest's hold rose to it at once and fell by 0.5 ms per window (half an
+    hour at 50p). Now the egress encodes silence while no audio flow is open,
+    and the aligner changes the hold by more than `av_resync_ms` only when two
+    windows in a row ask for it, then at once; errors beyond `av_resync_ms`
+    are stepped. Re-anchors log `av_resync` and count in
+    `av_resyncs_total{essence}`. Tests: unit cases in `tests/unit/test_logic.cpp`
+    and `tests/integration/avsync.sh` (with `mxl-srt-avsync-check`).
 
 ## MXL calls that matter
 

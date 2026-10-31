@@ -93,6 +93,7 @@ void FrameSynchroniser::reset()
 
 std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t lateNs)
 {
+    resynced = false;
     sumNs += errorNs;
     needNs = std::max(needNs, lateNs);
     if (++count < window)
@@ -100,7 +101,24 @@ std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t lateNs)
         return 0;
     }
     std::int64_t const before = holdNs;
-    holdNs = std::max({std::int64_t{0}, needNs + marginNs, holdNs - releaseNs});
+    // Audio that is missing from the source is no reason to hold, nor to drop the hold.
+    bool const arrived = needNs != INT64_MIN;
+    std::int64_t const need = arrived ? std::max<std::int64_t>(0, needNs + marginNs) : 0;
+    std::int64_t const released = std::max<std::int64_t>(0, holdNs - releaseNs);
+    // Beyond stepNs the hold follows the need only when two windows in a row ask for it: one late
+    // batch is not held, and a source whose bursts vary does not make it pump.
+    bool const bigRise = need > before + stepNs;
+    bool const bigDrop = arrived && before > need + stepNs;
+    if ((bigRise && rising) || (bigDrop && falling))
+    {
+        holdNs = need;
+    }
+    else
+    {
+        holdNs = bigRise ? released : std::max(need, released);
+    }
+    rising = bigRise && !rising;
+    falling = bigDrop && !falling;
     // A hold that rises is inserted at once, the video waits as long (holdNs); the rest is slewed.
     std::int64_t const attack = std::max<std::int64_t>(0, holdNs - before);
     std::int64_t const mean = sumNs / count - holdNs;
@@ -110,11 +128,26 @@ std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t lateNs)
     if (aligned && mean + attack >= -stepNs && mean + attack <= stepNs)
     {
         speed = std::clamp(static_cast<double>(mean + attack) / static_cast<double>(horizonNs), -maxSpeed, maxSpeed);
+        if (attack > stepNs)
+        {
+            resynced = true;
+            jumpNs = attack;
+        }
         return -attack * 48 / 1000000;
     }
+    bool const wasAligned = aligned;
     speed = 0;
     aligned = mean >= -toleranceNs && mean <= toleranceNs;
-    return aligned ? 0 : mean * 48 / 1000000;
+    if (aligned)
+    {
+        return 0;
+    }
+    if (wasAligned)
+    {
+        resynced = true;
+        jumpNs = -mean;
+    }
+    return mean * 48 / 1000000;
 }
 
 std::int64_t PtsMapper::add(std::int64_t sampleNs)
