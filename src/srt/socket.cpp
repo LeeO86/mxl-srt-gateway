@@ -11,22 +11,26 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <chrono>
 #include <set>
+#include <thread>
 #include <vector>
 
 namespace srtgw
 {
 namespace
 {
+// srt_cleanup() runs from cleanupSrt() at the end of a shutdown. From this static's destructor
+// (exit, __cxa_finalize) it raced libsrt's own static teardown and crashed the exit (SIGSEGV
+// instead of 143) once SRT had been used.
+std::atomic<bool> gStarted{false};
+
 struct Startup
 {
     Startup()
     {
         srt_startup();
-    }
-    ~Startup()
-    {
-        srt_cleanup();
+        gStarted.store(true);
     }
 };
 
@@ -117,6 +121,14 @@ void interruptSrt()
     for (auto* link : gLinks)
     {
         link->closeAll();
+    }
+}
+
+void cleanupSrt()
+{
+    if (gStarted.exchange(false))
+    {
+        srt_cleanup();
     }
 }
 
@@ -274,7 +286,7 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         // srt_listen on an already listening socket returns an error; ignore that case.
     }
     int const eid = listenEid_;
-    while (!stop.load())
+    while (!stop.load() && !gInterrupted.load())
     {
         SRTSOCKET ready[4] = {};
         int readyCount = 4;
@@ -282,6 +294,12 @@ bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         int const waited = srt_epoll_wait(eid, ready, &readyCount, nullptr, &writeCount, 200, nullptr, nullptr, nullptr, nullptr);
         if (waited == SRT_ERROR)
         {
+            // Anything but the 200 ms timeout: the epoll is gone (interruptSrt() closed this link
+            // at shutdown). Polling it again spun on "EID INVALID" until the channel stopped.
+            if (srt_getlasterror(nullptr) != SRT_ETIMEOUT)
+            {
+                return false;
+            }
             continue;
         }
         std::string peerText;
@@ -406,9 +424,34 @@ bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         closeData();
         return false;
     }
-    if (srt_connect(dataFd_, reinterpret_cast<sockaddr*>(&remote), remoteLength) == SRT_ERROR)
+    // Connects without blocking, so a stop or a shutdown does not wait out the connect timeout
+    // (3 s by default, which a caller backing off spent in srt_connect): the state is polled
+    // every 20 ms until SRT connects or gives up (it still applies SRTO_CONNTIMEO).
+    bool const blocking = false;
+    setOpt(dataFd_, SRTO_RCVSYN, &blocking, sizeof(blocking));
+    bool connected = srt_connect(dataFd_, reinterpret_cast<sockaddr*>(&remote), remoteLength) != SRT_ERROR;
+    std::string message = connected ? "" : srt_getlasterror_str();
+    while (connected)
     {
-        std::string const message = srt_getlasterror_str();
+        SRT_SOCKSTATUS const state = srt_getsockstate(dataFd_);
+        if (state == SRTS_CONNECTED)
+        {
+            break;
+        }
+        if ((state != SRTS_CONNECTING && state != SRTS_OPENED) || stop.load() || gInterrupted.load())
+        {
+            connected = false;
+            message = srt_rejectreason_str(srt_getrejectreason(dataFd_));
+            if (srt_getrejectreason(dataFd_) == SRT_REJ_BADSECRET)
+            {
+                message = "Passphrase";
+            }
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!connected)
+    {
         if (message.find("password") != std::string::npos || message.find("Passphrase") != std::string::npos)
         {
             logReject(config_.remoteHost, "passphrase");
@@ -420,6 +463,9 @@ bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
         closeData();
         return false;
     }
+    // Back to blocking reads (with SRTO_RCVTIMEO) for the data.
+    bool const sync = true;
+    setOpt(dataFd_, SRTO_RCVSYN, &sync, sizeof(sync));
     std::lock_guard const lock{mutex_};
     stats_.connected = true;
     stats_.peer = peerOf(dataFd_);

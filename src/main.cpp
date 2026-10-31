@@ -11,6 +11,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <thread>
@@ -122,15 +124,18 @@ int main()
             removeOwnDomain(store.config().mxlOutputDomainDir, store.config().mxlOutputDomainId);
         }
         server.stop();
+        cleanupSrt();
         if (std::chrono::steady_clock::now() > deadline)
         {
             log::warn("shutdown_timeout", {{"seconds", std::to_string(store.config().shutdownTimeoutS)}});
         }
-        if (signal == SIGTERM)
-        {
-            return 143;
-        }
-        return signal == 0 ? 0 : 128 + signal;
+        // Everything is stopped and released above. The process ends here without the exit-time
+        // destructors: Ubuntu's libsrt 1.5.3 (gnutls) crashed in its own static teardown
+        // (__cxa_finalize) after any SRT use, so a SIGTERM exited 139 instead of 143.
+        std::cout.flush();
+        std::cerr.flush();
+        std::fflush(nullptr);
+        std::_Exit(signal == SIGTERM ? 143 : (signal == 0 ? 0 : 128 + signal));
     }
     catch (ConfigError const& ex)
     {

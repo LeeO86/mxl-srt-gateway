@@ -21,11 +21,16 @@ std::atomic<bool> paused{false};
 
 // Writes a short v210 colour-bar flow plus a DC level on channel 0.
 // Usage: mxl-srt-flow-writer <domain-dir> <domain-id> <flow-id> <seconds> [audio-flow-id] [marks]
+//        [miss-percent] [late-ms]
 // The audio flow id defaults to <flow-id>-a. SIGTERM ends it early; the flows are deleted when it
 // exits. SIGUSR1 pauses or resumes the writing (the flows stay, their heads stand still).
-// "marks": a black picture with one white frame, and silence with a 100 ms 1 kHz tone, both
+// "marks": a black picture with three white frames, and silence with a 100 ms 1 kHz tone, both
 // starting on each TAI multiple of 5 s (for mxl-srt-avsync-check).
 // SRTGW_WRITER_RATE=50 writes 720p50 instead of 720p25.
+// miss-percent: that share of the video grains (pseudo-random, the same every run) is skipped
+// (never written), written invalid, or written late-ms (default 120) after its time, a third each,
+// as a source under load does (later grains are written on time meanwhile). The audio is always
+// written on time.
 int main(int argc, char** argv)
 {
     if (argc < 5)
@@ -42,6 +47,11 @@ int main(int argc, char** argv)
     std::signal(SIGUSR1, [](int) { paused.store(!paused.load()); });
     std::string const audioFlowId = argc > 5 ? argv[5] : flowId + "-a";
     bool const marks = argc > 6 && std::string(argv[6]) == "marks";
+    int const missPercent = argc > 7 ? std::atoi(argv[7]) : 0;
+    int const lateMs = argc > 8 ? std::atoi(argv[8]) : 120;
+    // Late grains: index and when to write it.
+    std::vector<std::pair<std::uint64_t, std::chrono::steady_clock::time_point>> late;
+    std::uint32_t random = 12345;
     VideoFormat format;
     format.width = 1280;
     format.height = 720;
@@ -77,8 +87,14 @@ int main(int argc, char** argv)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            auto const& picture = !marks ? bars : (index % static_cast<std::uint64_t>(5 * fps) == 0 ? white : dark);
-            video.write(index, picture.data(), picture.size(), false);
+            auto const& picture = !marks ? bars : (index % static_cast<std::uint64_t>(5 * fps) < 3 ? white : dark);
+            random = random * 1103515245u + 12345u;
+            int const roll = static_cast<int>((random >> 16) % 100);
+            int const miss = roll < missPercent ? roll % 3 : -1;
+            if (miss != 0 && miss != 2)
+            {
+                video.write(index, picture.data(), picture.size(), miss == 1);
+            }
             int const count = samplesPerGrain(static_cast<std::int64_t>(index), fps, 1);
             std::int64_t const first = sampleIndexAtGrain(static_cast<std::int64_t>(index), fps, 1);
             std::vector<float> samples(static_cast<std::size_t>(count * 2), 0.f);
@@ -90,7 +106,30 @@ int main(int argc, char** argv)
             }
             std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), fps, 1));
             audio.write(end, samples.data(), count, 2);
+            if (miss == 2)
+            {
+                late.emplace_back(index, std::chrono::steady_clock::now() + std::chrono::milliseconds(lateMs));
+            }
             ++index;
+            // Until the next grain is due, write the late grains whose time has come.
+            while (!stopping.load() && grainIndexNow(format.rate) < index)
+            {
+                auto const now = std::chrono::steady_clock::now();
+                for (auto it = late.begin(); it != late.end();)
+                {
+                    if (it->second <= now)
+                    {
+                        auto const& latePicture = !marks ? bars : (it->first % static_cast<std::uint64_t>(5 * fps) < 3 ? white : dark);
+                        video.write(it->first, latePicture.data(), latePicture.size(), false);
+                        it = late.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
         }
     }
     catch (std::exception const& ex)

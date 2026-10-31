@@ -177,9 +177,33 @@ void ChannelManager::stop()
     {
         supervisor_.join();
     }
-    std::lock_guard const lock{mu_};
-    slots_.clear();
-    ready_.store(false);
+    // The pipelines are stopped outside mu_: an egress asks route() (which takes mu_) on every
+    // grain, so joining it under mu_ deadlocked the shutdown with two egress channels or more
+    // (the second one blocked in route() while the first was being stopped). All are asked to
+    // stop first, so they end in parallel.
+    std::map<std::string, Slot> stopping;
+    {
+        std::lock_guard const lock{mu_};
+        stopping.swap(slots_);
+        ready_.store(false);
+    }
+    for (auto& item : stopping)
+    {
+        stopSlot(item.second);
+    }
+    stopping.clear();
+}
+
+void ChannelManager::stopSlot(Slot& slot)
+{
+    if (slot.ingest)
+    {
+        slot.ingest->requestStop();
+    }
+    if (slot.egress)
+    {
+        slot.egress->requestStop();
+    }
 }
 
 bool ChannelManager::ready() const
@@ -288,6 +312,8 @@ void ChannelManager::supervise()
             }
         }
         std::vector<ChannelConfig> starting;
+        // Channels that go are stopped outside mu_ (see stop()).
+        std::vector<Slot> removed;
         {
             std::lock_guard const lock{mu_};
             for (auto it = slots_.begin(); it != slots_.end();)
@@ -295,6 +321,7 @@ void ChannelManager::supervise()
                 auto const found = wanted.find(it->first);
                 if (found == wanted.end() || channelToJson(found->second, true) != it->second.signature)
                 {
+                    removed.push_back(std::move(it->second));
                     it = slots_.erase(it);
                 }
                 else
@@ -311,6 +338,11 @@ void ChannelManager::supervise()
                 }
             }
         }
+        for (auto& slot : removed)
+        {
+            stopSlot(slot);
+        }
+        removed.clear();
         for (auto const& channel : starting)
         {
             try
@@ -425,6 +457,7 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << "\",\"peer\":\"" << jsonEscape(status.peer) << "\",\"source_format\":\"" << jsonEscape(status.sourceFormat) << "\",\"target_format\":\""
         << jsonEscape(status.targetFormat.empty() ? channel.target.label() : status.targetFormat) << "\",\"decoder\":\"" << jsonEscape(status.decoder)
         << "\",\"encoder\":\"" << jsonEscape(status.encoder) << "\",\"video_codec_hw\":\"" << videoCodecHw(status.decoder, status.encoder) << "\",\"frames\":" << status.frames << ",\"repeats\":" << status.repeats << ",\"drops\":" << status.drops
+        << ",\"repeated_frames\":" << status.repeatedFrames << ",\"slate_frames\":" << status.slateFrames << ",\"audio_silent_grains\":" << status.audioSilentGrains
         << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"av_resyncs\":{\"video\":" << status.avResyncsVideo
         << ",\"audio\":" << status.avResyncsAudio << "}" << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
@@ -517,6 +550,9 @@ ProcessMetrics ChannelManager::metrics() const
         item.drops = status.drops;
         item.flowReopensRecreated = status.flowReopensRecreated;
         item.flowReopensStalled = status.flowReopensStalled;
+        item.repeatedFrames = status.repeatedFrames;
+        item.slateFrames = status.slateFrames;
+        item.audioSilentGrains = status.audioSilentGrains;
         item.avResyncsVideo = status.avResyncsVideo;
         item.avResyncsAudio = status.avResyncsAudio;
         item.avResyncJumpVideoMs = status.avResyncJumpVideoMs;

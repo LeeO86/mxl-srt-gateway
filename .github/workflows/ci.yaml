@@ -94,8 +94,14 @@ jobs:
       - name: Lip sync after a source restart
         run: tests/integration/avsync.sh ./build/mxl-srt-gateway
 
+      - name: Source that misses grains
+        run: tests/integration/egress_gaps.sh ./build/mxl-srt-gateway
+
       - name: Start-up with stale flows
         run: tests/integration/startup.sh ./build/mxl-srt-gateway 20
 
       - name: Shutdown
         run: tests/integration/shutdown.sh ./build/mxl-srt-gateway
+
+      - name: Stop with many channels
+        run: tests/integration/stop.sh ./build/mxl-srt-gateway

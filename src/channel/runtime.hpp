@@ -53,6 +53,8 @@ private:
         std::unique_ptr<EgressPipeline> egress;
     };
     std::map<std::string, Slot> slots_;
+    // Asks a slot's pipeline to stop, without waiting.
+    static void stopSlot(Slot& slot);
     std::map<std::string, FlowRoute> videoRoutes_;
     std::map<std::string, FlowRoute> audioRoutes_;
     std::uint64_t routeGeneration_ = 0;

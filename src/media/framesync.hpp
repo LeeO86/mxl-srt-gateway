@@ -124,6 +124,29 @@ struct VideoPhase
     [[nodiscard]] std::int64_t value(std::int64_t grainNs) const;
 };
 
+// Egress: what an output grain carries when its source grain may be missing. A grain the source
+// skipped, marked invalid or did not commit by the send deadline repeats the last good frame;
+// only when no good grain came for longer than `holdNs` (hold_ms, a real loss of signal) is the
+// slate sent. The first good grain afterwards is sent again at once.
+enum class EgressPicture
+{
+    Source,
+    Repeat,
+    Slate,
+};
+
+struct EgressHold
+{
+    std::int64_t holdNs = 500000000;
+    bool haveGood = false;
+    std::int64_t lastGoodNs = 0;
+
+    // `nowNs`: the output grain's time; `good`: its source grain was read and valid.
+    [[nodiscard]] EgressPicture decide(bool good, std::int64_t nowNs);
+    // The route changed: nothing to repeat any more.
+    void reset();
+};
+
 // Silence (48 kHz samples) to queue before decoded audio that starts `gapNs` after the queued audio
 // ends: a gap in the source timestamps (lost or skipped frames) then keeps the queued samples on
 // their times. Below 2 ms it is rounding; beyond 1 s it is a jump, which the aligner steps.
