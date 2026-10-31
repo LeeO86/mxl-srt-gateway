@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.6
 
 ### Fixes
 
@@ -30,6 +30,7 @@
 
 - After the update the loop's AV offset should read about 0 ms (within about 1 ms) instead of −5 ms; a channel with an `audio_offset_ms` set to correct that should have it set back to 0.
 - An egress with a source that misses grains now shows repeated frames instead of slate frames: watch `egress_repeated_frames_total`; `egress_slate_frames_total` rises only on a real loss (over `hold_ms`), or while a route waits for its flow.
+- The Compose and Kubernetes examples use the `1.4.6` image.
 
 ## 1.4.5
 

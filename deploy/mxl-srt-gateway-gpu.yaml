@@ -23,7 +23,7 @@ spec:
         supplementalGroups: [1000]
       containers:
         - name: gateway
-          image: ghcr.io/leeo86/mxl-srt-gateway:1.4.5
+          image: ghcr.io/leeo86/mxl-srt-gateway:1.4.6
           env:
             - name: DECODER
               value: auto
