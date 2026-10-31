@@ -461,7 +461,7 @@ flows no writer holds). It never runs while a flow writer is being created: a fl
 a killed run (same id, unlocked) is reopened by its new writer, and a collection between
 the writer finding it and locking it would delete it under the writer.
 | `STATE_DIR` | `/config` | config persistence and IS-05 `routes.json` |
-| `SHUTDOWN_TIMEOUT_S` | `10` | SIGTERM budget. Exit code is 143 |
+| `SHUTDOWN_TIMEOUT_S` | `10` | SIGTERM budget. Exit code is 143. All channels are asked to stop at once and end in parallel (no blocking wait: backoffs and SRT connects wake within 20 ms), well within it (`tests/integration/stop.sh`: under 1 s with 3 egress and 3 ingest channels) |
 | `DECODER` / `ENCODER` | `auto` | `auto`, `nvdec`/`nvenc`, `cpu` |
 | `SRT_PORT_RANGE` | `9000-9099` | allowed listener ports |
 | `NMOS_REGISTRY_ADDRESS` / `NMOS_REGISTRY_PORT` | empty / 3210 | Registration API |

@@ -177,9 +177,33 @@ void ChannelManager::stop()
     {
         supervisor_.join();
     }
-    std::lock_guard const lock{mu_};
-    slots_.clear();
-    ready_.store(false);
+    // The pipelines are stopped outside mu_: an egress asks route() (which takes mu_) on every
+    // grain, so joining it under mu_ deadlocked the shutdown with two egress channels or more
+    // (the second one blocked in route() while the first was being stopped). All are asked to
+    // stop first, so they end in parallel.
+    std::map<std::string, Slot> stopping;
+    {
+        std::lock_guard const lock{mu_};
+        stopping.swap(slots_);
+        ready_.store(false);
+    }
+    for (auto& item : stopping)
+    {
+        stopSlot(item.second);
+    }
+    stopping.clear();
+}
+
+void ChannelManager::stopSlot(Slot& slot)
+{
+    if (slot.ingest)
+    {
+        slot.ingest->requestStop();
+    }
+    if (slot.egress)
+    {
+        slot.egress->requestStop();
+    }
 }
 
 bool ChannelManager::ready() const
@@ -288,6 +312,8 @@ void ChannelManager::supervise()
             }
         }
         std::vector<ChannelConfig> starting;
+        // Channels that go are stopped outside mu_ (see stop()).
+        std::vector<Slot> removed;
         {
             std::lock_guard const lock{mu_};
             for (auto it = slots_.begin(); it != slots_.end();)
@@ -295,6 +321,7 @@ void ChannelManager::supervise()
                 auto const found = wanted.find(it->first);
                 if (found == wanted.end() || channelToJson(found->second, true) != it->second.signature)
                 {
+                    removed.push_back(std::move(it->second));
                     it = slots_.erase(it);
                 }
                 else
@@ -311,6 +338,11 @@ void ChannelManager::supervise()
                 }
             }
         }
+        for (auto& slot : removed)
+        {
+            stopSlot(slot);
+        }
+        removed.clear();
         for (auto const& channel : starting)
         {
             try

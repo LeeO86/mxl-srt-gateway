@@ -24,6 +24,8 @@ struct SrtStats
 };
 
 void interruptSrt();
+// Ends SRT (srt_cleanup) once every link is gone: the last step of a shutdown.
+void cleanupSrt();
 bool srtInterrupted();
 
 class SrtLink
