@@ -3,8 +3,12 @@
 # onset every 5 s, mxl-srt-avsync-check):
 # - loop: an MXL writer -> egress (H.264 + AAC) -> SRT -> ingest; the writer restarts (its flows
 #   are deleted and created again, its timestamps go on on TAI);
-# - an ffmpeg sender -> SRT -> ingest; the sender restarts with a new PTS base.
-# After each restart the AV offset must be back at its value before within 3 s: within 25 ms for
+# - an ffmpeg sender -> SRT -> ingest; the sender restarts with a new PTS base;
+# - a 720p50 loop (writer, egress and ingest at 50p), steady.
+# The gateway, with its two egress channels, must then exit 143 on SIGTERM.
+# The loop's own AV offset must be within 2 ms of 0 (1.4.5: +7 ms at 25p, the phase of the video
+# on the output grid). After each restart the AV offset must be back at its value before within
+# 3 s: within 25 ms for
 # the loop, 80 ms for the ffmpeg sender (its own offset differs by up to about 40 ms from one
 # connection to the next, also in 1.4.4).
 # Usage: tests/integration/avsync.sh [gateway] [flow-writer] [avsync-check]
@@ -18,10 +22,13 @@ API=http://127.0.0.1:18160/api/v1
 SRC_ID=5a5a5a5a-0000-4000-8000-000000000002
 VIDEO=5a5a5a5a-0000-4000-8000-0000000000cc
 AUDIO=5a5a5a5a-0000-4000-8000-0000000000dd
+VIDEO50=5a5a5a5a-0000-4000-8000-0000000000ce
+AUDIO50=5a5a5a5a-0000-4000-8000-0000000000df
 WPID=""
+W50=""
 GW=""
 SRC=""
-trap 'rc=$?; [ "$rc" = 0 ] || tail -n 40 "$WORK/gw.log" >&2 || true; kill $GW $WPID $SRC 2>/dev/null || true; rm -rf "$WORK"' EXIT
+trap 'rc=$?; [ "$rc" = 0 ] || tail -n 40 "$WORK/gw.log" >&2 || true; kill $GW $WPID $W50 $SRC 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 cat > "$WORK/config.json" <<EOF
 {
@@ -51,6 +58,22 @@ cat > "$WORK/config.json" <<EOF
       "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "25"}
     },
     {
+      "id": "tx50",
+      "label": "TX50",
+      "direction": "egress",
+      "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19404, "latency_ms": 120},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"},
+      "egress": {"codec": "h264", "bitrate": 4000000, "preset": "ultrafast", "tune": "zerolatency",
+                 "audio_tracks": [{"codec": "aac", "layout": "stereo", "channels": [0, 1], "language": "eng"}]}
+    },
+    {
+      "id": "rx-loop50",
+      "label": "RX loop 50",
+      "direction": "ingest",
+      "srt": {"mode": "caller", "remote_host": "127.0.0.1", "remote_port": 19404, "latency_ms": 120},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"}
+    },
+    {
       "id": "rx-ffmpeg",
       "label": "RX ffmpeg",
       "direction": "ingest",
@@ -61,13 +84,14 @@ cat > "$WORK/config.json" <<EOF
 }
 EOF
 
+PORT=18160
 api() {
-  python3 - "$@" <<'PY'
+  python3 - "$PORT" "$@" <<'PY'
 import json, sys, urllib.request
-method, path = sys.argv[1], sys.argv[2]
-body = sys.argv[3].encode() if len(sys.argv) > 3 else None
-req = urllib.request.Request("http://127.0.0.1:18160/api/v1" + path, data=body, method=method, headers={"content-type": "application/json"})
-print(urllib.request.urlopen(req, timeout=5).read().decode())
+port, method, path = sys.argv[1], sys.argv[2], sys.argv[3]
+body = sys.argv[4].encode() if len(sys.argv) > 4 else None
+req = urllib.request.Request("http://127.0.0.1:" + port + "/api/v1" + path, data=body, method=method, headers={"content-type": "application/json"})
+print(urllib.request.urlopen(req, timeout=15).read().decode())
 PY
 }
 flow() {
@@ -102,11 +126,12 @@ stop_source() {
   wait "$SRC" 2>/dev/null || true
   SRC=""
 }
-# check <channel> <what> <seconds> <restart> <tolerance ms>: measures the ingest's output for
-# <seconds>; <restart> (a shell function) runs 17 s in. The marks 3 s or more after the restart
-# must be within <tolerance ms> of the median before it.
+# check <channel> <what> <seconds> <restart> <tolerance ms> [steady ms]: measures the ingest's
+# output for <seconds>; <restart> (a shell function) runs 17 s in. The marks 3 s or more after
+# the restart must be within <tolerance ms> of the median before it, and with [steady ms] that
+# median within [steady ms] of 0 (a loop's own AV offset).
 check() {
-  local channel="$1" what="$2" seconds="$3" restart="$4" tolerance="$5"
+  local channel="$1" what="$2" seconds="$3" restart="$4" tolerance="$5" steady="${6:--1}"
   "$CHECK" "$WORK/mxl/out" "$(flow "$channel" video)" "$(flow "$channel" audio)" "$seconds" > "$WORK/marks.jsonl" &
   local cpid=$!
   sleep 17
@@ -114,19 +139,31 @@ check() {
   at="$(date +%s.%N)"
   "$restart"
   wait "$cpid"
-  python3 - "$WORK/marks.jsonl" "$at" "$what" "$tolerance" <<'PY'
+  python3 - "$WORK/marks.jsonl" "$at" "$what" "$tolerance" "$steady" <<'PY'
 import json, statistics, sys
 marks = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-at, what, tolerance = float(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+at, what, tolerance, steady = float(sys.argv[2]), sys.argv[3], float(sys.argv[4]), float(sys.argv[5])
 before = [m["av_ms"] for m in marks if m["unix_s"] < at]
 after = [(m["unix_s"] - at, m["av_ms"]) for m in marks if m["unix_s"] >= at]
 print(what, "AV before (ms):", before, "after (s after the restart, ms):", [(round(t, 1), a) for t, a in after])
 assert len(before) >= 2, "too few marks before the restart"
 base = statistics.median(before)
+assert steady < 0 or abs(base) <= steady, f"{what}: steady AV offset {base} ms, more than {steady} ms"
 settled = [a for t, a in after if t >= 3]
 assert len(settled) >= 2, "too few marks after the restart"
 bad = [a for a in settled if abs(a - base) > tolerance]
 assert not bad, f"{what}: AV offset {bad} ms after the restart, {base} ms before"
+PY
+}
+# steady <channel> <what> <seconds> <ms>: the median AV offset over <seconds> within <ms> of 0.
+steady() {
+  "$CHECK" "$WORK/mxl/out" "$(flow "$1" video)" "$(flow "$1" audio)" "$3" > "$WORK/steady.jsonl"
+  python3 - "$WORK/steady.jsonl" "$2" "$4" <<'PY'
+import json, statistics, sys
+av = [json.loads(line)["av_ms"] for line in open(sys.argv[1]) if line.strip()]
+print(sys.argv[2], "AV (ms):", av)
+assert len(av) >= 2, "too few marks"
+assert abs(statistics.median(av)) <= float(sys.argv[3]), f"{sys.argv[2]}: steady AV offset {statistics.median(av)} ms"
 PY
 }
 restart_writer() {
@@ -142,6 +179,8 @@ restart_sender() {
 
 mkdir -p "$WORK/mxl"
 start_writer
+SRTGW_WRITER_RATE=50 "$WRITER" "$WORK/mxl/src" "$SRC_ID" "$VIDEO50" 300 "$AUDIO50" marks &
+W50=$!
 SRTGW_CONFIG_FILE="$WORK/config.json" stdbuf -oL -eL "$BIN" > "$WORK/gw.log" 2>&1 &
 GW=$!
 for _ in $(seq 1 20); do
@@ -149,14 +188,19 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 api POST /channels/tx1/route "{\"video_active\":true,\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO\",\"audio_flow\":\"$AUDIO\"}" >/dev/null
+api POST /channels/tx50/route "{\"video_active\":true,\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO50\",\"audio_flow\":\"$AUDIO50\"}" >/dev/null
 sleep 2
 send 0
 sleep 4
 
-check rx-loop "loop, MXL source restarted" 40 restart_writer 25
+check rx-loop "loop, MXL source restarted" 40 restart_writer 25 2
 check rx-ffmpeg "ffmpeg sender restarted (new PTS base)" 40 restart_sender 80
+steady rx-loop50 "loop at 50p" 16 2
 grep '"event":"av_resync"' "$WORK/gw.log" || true
 
-kill -TERM "$GW" || true
-wait "$GW" || true
+kill -TERM "$GW"
+code=0
+wait "$GW" || code=$?
+GW=""
+[ "$code" = 143 ] || { echo "the gateway exited $code on SIGTERM, not 143" >&2; exit 1; }
 echo "avsync ok"

@@ -26,6 +26,7 @@ std::atomic<bool> paused{false};
 // exits. SIGUSR1 pauses or resumes the writing (the flows stay, their heads stand still).
 // "marks": a black picture with three white frames, and silence with a 100 ms 1 kHz tone, both
 // starting on each TAI multiple of 5 s (for mxl-srt-avsync-check).
+// SRTGW_WRITER_RATE=50 writes 720p50 instead of 720p25.
 // miss-percent: that share of the video grains (pseudo-random, the same every run) is skipped
 // (never written), written invalid, or written late-ms (default 120) after its time, a third each,
 // as a source under load does (later grains are written on time meanwhile). The audio is always
@@ -54,7 +55,9 @@ int main(int argc, char** argv)
     VideoFormat format;
     format.width = 1280;
     format.height = 720;
-    format.rate = Rate{25, 1, "25"};
+    char const* rateEnv = std::getenv("SRTGW_WRITER_RATE");
+    int const fps = rateEnv != nullptr && std::string(rateEnv) == "50" ? 50 : 25;
+    format.rate = Rate{fps, 1, std::to_string(fps)};
     try
     {
         MxlDomain domain(domainDir, domainId, 1000000000, true);
@@ -67,7 +70,7 @@ int main(int argc, char** argv)
         fillV210(white.data(), format.width, format.height, 940, 512, 512);
         std::int64_t const periodSamples = 5 * 48000;
         std::uint64_t index = grainIndexNow(format.rate);
-        int const total = std::max(1, seconds) * 25;
+        int const total = std::max(1, seconds) * fps;
         for (int i = 0; i < total && !stopping.load(); ++i)
         {
             if (paused.load())
@@ -84,7 +87,7 @@ int main(int argc, char** argv)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
-            auto const& picture = !marks ? bars : (index % (5 * 25) < 3 ? white : dark);
+            auto const& picture = !marks ? bars : (index % static_cast<std::uint64_t>(5 * fps) < 3 ? white : dark);
             random = random * 1103515245u + 12345u;
             int const roll = static_cast<int>((random >> 16) % 100);
             int const miss = roll < missPercent ? roll % 3 : -1;
@@ -92,8 +95,8 @@ int main(int argc, char** argv)
             {
                 video.write(index, picture.data(), picture.size(), miss == 1);
             }
-            int const count = samplesPerGrain(static_cast<std::int64_t>(index), 25, 1);
-            std::int64_t const first = sampleIndexAtGrain(static_cast<std::int64_t>(index), 25, 1);
+            int const count = samplesPerGrain(static_cast<std::int64_t>(index), fps, 1);
+            std::int64_t const first = sampleIndexAtGrain(static_cast<std::int64_t>(index), fps, 1);
             std::vector<float> samples(static_cast<std::size_t>(count * 2), 0.f);
             for (int frame = 0; frame < count; ++frame)
             {
@@ -101,7 +104,7 @@ int main(int argc, char** argv)
                 samples[static_cast<std::size_t>(frame * 2)] =
                     !marks ? 0.1f : (inPeriod < 4800 ? static_cast<float>(0.25 * std::sin(2.0 * 3.14159265358979 * 1000.0 * static_cast<double>(inPeriod) / 48000.0)) : 0.f);
             }
-            std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), 25, 1));
+            std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), fps, 1));
             audio.write(end, samples.data(), count, 2);
             if (miss == 2)
             {
@@ -116,7 +119,7 @@ int main(int argc, char** argv)
                 {
                     if (it->second <= now)
                     {
-                        auto const& latePicture = !marks ? bars : (it->first % (5 * 25) < 3 ? white : dark);
+                        auto const& latePicture = !marks ? bars : (it->first % static_cast<std::uint64_t>(5 * fps) < 3 ? white : dark);
                         video.write(it->first, latePicture.data(), latePicture.size(), false);
                         it = late.erase(it);
                     }

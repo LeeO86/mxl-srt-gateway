@@ -111,7 +111,8 @@ both.
    late against the video. The decoder now records each audio queue's source
    PTS and the video's PTS-to-TAI offset. Before each grain the writer takes
    the error of the queue's first sample against its mapped time +
-   `sync_latency_ms` + half a grain and hands it to `AudioAligner`
+   `sync_latency_ms` + the video's phase on the output grid (`VideoPhase`;
+   half a grain up to 1.4.5) and hands it to `AudioAligner`
    (`src/media/framesync.cpp`), which acts on the mean of 25 grains:
    - until a mean is within 20 ms (start-up: the video offset settles over
      2–3 s), it drops or inserts that many samples at once;
@@ -257,7 +258,7 @@ both.
       source it rose to the gap's length and then came down at 1 ms/s, so the
       audio played up to 113 ms late for a minute after load. The hold is now
       taken from each decoded audio frame's arrival against its first sample's
-      due time (TAI of its PTS + `sync_latency_ms` − half a grain), and a gap
+      due time (TAI of its PTS + `sync_latency_ms` + the video phase − a grain; − half a grain up to 1.4.5), and a gap
       in the source PTS is filled with silence in the queue (`gapSamples`,
       2 ms to 1 s), so the audio after a gap is on time and not held. For a
       contiguous burst both measures are the same. The video now waits as long

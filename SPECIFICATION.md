@@ -239,9 +239,14 @@ https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
   filters, always on, also 48 → 48 kHz; soxr has no drift compensation) and
   queued with its source timestamps. Before each grain, the writer lines the
   queue up with the video: the first queued sample plays at its mapped
-  presentation time + `sync_latency_ms` (half a grain later, like the frame the
-  synchroniser shows); without a video mapping it holds the queue at
-  `sync_latency_ms`. It acts on the mean error over 25 grains:
+  presentation time + `sync_latency_ms` + the phase the synchroniser shows the
+  frames with: a frame is shown on the first grain at or after its mapped time
+  + `sync_latency_ms`, so it waits a fixed part of a grain (0 to 1 grain, the
+  mapping's phase against the grid), measured on each newly shown frame and
+  smoothed over about 20 frames (a change beyond 5 ms is taken at once); half a
+  grain until a frame was shown. (Up to 1.4.5 it was always half a grain: a
+  steady AV error of up to half a grain, −5 ms on a 50p loop.) Without a
+  video mapping it holds the queue at `sync_latency_ms`. It acts on the mean error over 25 grains:
   - at the start, it drops the older samples or inserts silence until the mean
     error is within 20 ms;
   - after that, the resampler plays the audio faster or slower by error / 2 s,

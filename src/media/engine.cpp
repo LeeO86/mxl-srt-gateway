@@ -602,6 +602,8 @@ struct IngestPipeline::Shared
     bool haveOffset = false;
     // Steps of that offset (PtsMapper) the writer has not moved the audio queues by yet.
     std::int64_t mapStepNs = 0;
+    // The writer's VideoPhase (ns), for the audio's due time; -1 until it has one.
+    std::int64_t videoPhaseNs = -1;
     // Those steps: how many, and the last one (ns).
     std::uint64_t videoResyncs = 0;
     std::int64_t videoJumpNs = 0;
@@ -1462,8 +1464,10 @@ void IngestPipeline::runIo()
                                 if (queue.aligner.aligned && shared_->haveOffset)
                                 {
                                     // Its first sample is due when the writer's grain reaches it: TAI of its
-                                    // PTS + sync_latency_ms - half a grain (+ audio_offset_ms).
-                                    std::int64_t const dueNs = startNs + shared_->ptsOffsetNs + latencyNs - grainNs / 2 + audioOffsetNs;
+                                    // PTS + sync_latency_ms + the video's phase on the grid (VideoPhase) - a
+                                    // grain (+ audio_offset_ms).
+                                    std::int64_t const phaseNs = shared_->videoPhaseNs >= 0 ? shared_->videoPhaseNs : grainNs / 2;
+                                    std::int64_t const dueNs = startNs + shared_->ptsOffsetNs + latencyNs + phaseNs - grainNs + audioOffsetNs;
                                     queue.lateNs = std::max(queue.lateNs, static_cast<std::int64_t>(taiNowNs()) - dueNs);
                                 }
                                 if (queue.ptsValid && !queue.samples.empty())
@@ -1553,6 +1557,8 @@ void IngestPipeline::runClock()
     std::int64_t audioJumpNs = 0;
     std::uint64_t videoResyncs = 0;
     std::int64_t videoJumpNs = 0;
+    // When the synchroniser shows a frame after its mapped time + sync latency (VideoPhase).
+    VideoPhase phase;
     // MXL interlaced flows: one grain per field (see the video write below).
     bool const fieldGrains = config_.target.interlaced;
     bool const topFieldFirst = config_.target.fieldOrder != "bff";
@@ -1590,8 +1596,9 @@ void IngestPipeline::runClock()
             sourceFormat = shared_->sourceFormat;
             decoder = shared_->decoder;
             // Line each audio queue up with the video: its first sample plays at the time its PTS
-            // maps to plus the sync latency, half a grain later like the frame the synchroniser
-            // shows. Without a video mapping the queue is held at the sync latency.
+            // maps to plus the sync latency, plus the phase the synchroniser shows the frames with
+            // on the output grid (VideoPhase; half a grain until a frame was shown). Without a
+            // video mapping the queue is held at the sync latency.
             auto const outputNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index));
             auto const grainNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index + 1)) - outputNs;
             std::int64_t const latencyNs = static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL;
@@ -1601,6 +1608,7 @@ void IngestPipeline::runClock()
             // + later (silence before it), - earlier (its head dropped).
             std::int64_t const mapStep = shared_->mapStepNs * 48 / 1000000;
             shared_->mapStepNs = 0;
+            shared_->videoPhaseNs = phase.valid ? phase.value(grainNs) : -1;
             for (std::size_t q = 0; q < shared_->audio.size(); ++q)
             {
                 auto& live = shared_->audio[q];
@@ -1626,10 +1634,10 @@ void IngestPipeline::runClock()
                 std::int64_t headNs = outputNs - levelNs;
                 std::int64_t targetNs = outputNs - latencyNs;
                 std::int64_t const mappedNs = live.endPtsNs + shared_->ptsOffsetNs - levelNs;
-                if (shared_->haveOffset && live.ptsValid && std::llabs(mappedNs - (targetNs - grainNs / 2)) < 2000000000LL)
+                if (shared_->haveOffset && live.ptsValid && std::llabs(mappedNs - (targetNs - phase.value(grainNs))) < 2000000000LL)
                 {
                     headNs = mappedNs;
-                    targetNs -= grainNs / 2;
+                    targetNs -= phase.value(grainNs);
                 }
                 targetNs -= audioOffsetNs;
                 std::int64_t const correction = live.aligner.add(targetNs - headNs, live.lateNs);
@@ -1685,6 +1693,19 @@ void IngestPipeline::runClock()
         // sync_latency_ms.
         auto const decision = sync.choose(static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index)) - videoHoldNs, stamps);
         sync.commit(decision);
+        if (!decision.slate && !decision.repeat)
+        {
+            for (auto const& stamp : stamps)
+            {
+                if (stamp.index == decision.sourceIndex)
+                {
+                    auto const shownNs = static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index));
+                    phase.add(shownNs - videoHoldNs - static_cast<std::int64_t>(config_.syncLatencyMs) * 1000000LL - stamp.mappedPtsNs,
+                        static_cast<std::int64_t>(grainTimeNs(config_.target.rate, index + 1)) - shownNs);
+                    break;
+                }
+            }
+        }
         if (decision.repeat)
         {
             ++repeats;

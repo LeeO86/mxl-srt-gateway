@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- An ingest played its audio up to half a grain early or late against its video, for good: −4.6…−5.1 ms on the platform's loop (x264 + AAC 15 Mbit/s, SRT latency 120, sync latency 120; audio index shift 475.0–475.4 ms, video 480; 72 of 200 analyzer events at the warn limit). It lined each audio queue up at its mapped time + `sync_latency_ms` + half a grain, "like the frame the synchroniser shows". But the synchroniser shows a frame on the first output grain at or after its mapped time + `sync_latency_ms`, so the frame waits a fixed part of a grain: the phase of the PTS mapping (which follows the earliest frames) against the grain grid, anywhere from 0 to a grain and the same for as long as the mapping holds. The audio now waits that phase, measured on each newly shown frame (`VideoPhase`, smoothed over about 20 frames, a change beyond 5 ms taken at once). It was not the AAC encoder delay (FFmpeg's encoder and decoder carry its 1024 samples of priming in the timestamps) nor the aligner's margin. Measured with `tests/integration/avsync.sh` (MXL writer → egress H.264 + AAC → SRT → ingest, AV offset of the ingest's MXL output): 720p25 loop 1.4.5 +6.1…+8.2 ms (phase 12.5–13 ms, so +20 − 13), now +0.4…+1.1 ms; 720p50 loop 1.4.5 +6.2…+6.7 ms, now +0.6…+0.8 ms; with only the egress or only the ingest at 50p 1.4.5 −3.5…−4.6 ms, now +0.5…+1.0 ms.
+
 - An egress whose MXL source missed a grain (not written, written invalid, or committed after the egress's wait) sent its slate for that output frame, so a source under load put slate frames between real ones (platform: an AV-sync analyzer behind SRT lost about 3 of 4 events, slates inside its flash and QR windows). It waited up to 40 ms for the sync group and 40 ms per field grain, more than a 50p frame, so a source that committed late could also make it fall more than 4 grains behind and skip output grains. Now:
   - a missing, invalid or late source grain repeats the last good frame; the slate is sent only when no good grain came for longer than the channel's `hold_ms` (default 500 ms, as on ingest; 0 keeps the old behaviour). 500 ms rides out a source that misses one grain in five, shows a real loss within half a second, and is shorter than the 1 s grain history the repeated frame is copied from (it is copied once, when the first grain after it fails);
   - the waits end at the frame's send deadline, half a grain after its tick (the audio at the next tick), so a late source costs a repeat, never a skipped grain.
@@ -19,12 +21,14 @@
 
 ### Added
 
+- `tests/integration/avsync.sh` also checks the loop's own AV offset (within 2 ms of 0) and a 720p50 loop; `mxl-srt-flow-writer` writes 720p50 with `SRTGW_WRITER_RATE=50`.
 - Metrics `mxl_srt_gateway_egress_repeated_frames_total{channel}`, `mxl_srt_gateway_egress_slate_frames_total{channel}` (slate sent while routed) and `mxl_srt_gateway_egress_audio_silent_grains_total{channel}`; the channel status has `repeated_frames`, `slate_frames` and `audio_silent_grains`. The egress form in the UI has `hold_ms` ("Repeat the last frame for ms").
 - `tests/integration/egress_gaps.sh` (in CI). `mxl-srt-flow-writer … marks [miss-percent] [late-ms]` skips, invalidates or delays that share of its video grains; its marks are now 3 white frames. `mxl-srt-avsync-check … [run-frames]` checks each mark's white run and counts the slate frames around it.
 - `tests/integration/stop.sh` (in CI).
 
 ### Notes for the platform
 
+- After the update the loop's AV offset should read about 0 ms (within about 1 ms) instead of −5 ms; a channel with an `audio_offset_ms` set to correct that should have it set back to 0.
 - An egress with a source that misses grains now shows repeated frames instead of slate frames: watch `egress_repeated_frames_total`; `egress_slate_frames_total` rises only on a real loss (over `hold_ms`), or while a route waits for its flow.
 
 ## 1.4.5
