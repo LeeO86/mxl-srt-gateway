@@ -4,8 +4,8 @@
 # - loop: an MXL writer -> egress (H.264 + AAC) -> SRT -> ingest; the writer restarts (its flows
 #   are deleted and created again, its timestamps go on on TAI);
 # - an ffmpeg sender -> SRT -> ingest; the sender restarts with a new PTS base;
-# - a 720p50 loop (writer, egress and ingest at 50p), steady, in a second gateway (two egress
-#   channels in one process do not stop on SIGTERM yet, also in 1.4.5).
+# - a 720p50 loop (writer, egress and ingest at 50p), steady.
+# The gateway, with its two egress channels, must then exit 143 on SIGTERM.
 # The loop's own AV offset must be within 2 ms of 0 (1.4.5: +7 ms at 25p, the phase of the video
 # on the output grid). After each restart the AV offset must be back at its value before within
 # 3 s: within 25 ms for
@@ -56,6 +56,22 @@ cat > "$WORK/config.json" <<EOF
       "direction": "ingest",
       "srt": {"mode": "caller", "remote_host": "127.0.0.1", "remote_port": 19402, "latency_ms": 120},
       "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "25"}
+    },
+    {
+      "id": "tx50",
+      "label": "TX50",
+      "direction": "egress",
+      "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19404, "latency_ms": 120},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"},
+      "egress": {"codec": "h264", "bitrate": 4000000, "preset": "ultrafast", "tune": "zerolatency",
+                 "audio_tracks": [{"codec": "aac", "layout": "stereo", "channels": [0, 1], "language": "eng"}]}
+    },
+    {
+      "id": "rx-loop50",
+      "label": "RX loop 50",
+      "direction": "ingest",
+      "srt": {"mode": "caller", "remote_host": "127.0.0.1", "remote_port": 19404, "latency_ms": 120},
+      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"}
     },
     {
       "id": "rx-ffmpeg",
@@ -163,6 +179,8 @@ restart_sender() {
 
 mkdir -p "$WORK/mxl"
 start_writer
+SRTGW_WRITER_RATE=50 "$WRITER" "$WORK/mxl/src" "$SRC_ID" "$VIDEO50" 300 "$AUDIO50" marks &
+W50=$!
 SRTGW_CONFIG_FILE="$WORK/config.json" stdbuf -oL -eL "$BIN" > "$WORK/gw.log" 2>&1 &
 GW=$!
 for _ in $(seq 1 20); do
@@ -170,55 +188,19 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 api POST /channels/tx1/route "{\"video_active\":true,\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO\",\"audio_flow\":\"$AUDIO\"}" >/dev/null
+api POST /channels/tx50/route "{\"video_active\":true,\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO50\",\"audio_flow\":\"$AUDIO50\"}" >/dev/null
 sleep 2
 send 0
 sleep 4
 
 check rx-loop "loop, MXL source restarted" 40 restart_writer 25 2
 check rx-ffmpeg "ffmpeg sender restarted (new PTS base)" 40 restart_sender 80
-grep '"event":"av_resync"' "$WORK/gw.log" || true
-kill -TERM "$GW" || true
-wait "$GW" || true
-stop_source
-stop_writer
-
-# The 720p50 loop.
-python3 - "$WORK/config.json" "$WORK/config50.json" <<'PY'
-import json, sys
-c = json.load(open(sys.argv[1]))
-c["WEB_PORT"] = 18161
-c["channels"] = json.loads("""[
-    {
-      "id": "tx50",
-      "label": "TX50",
-      "direction": "egress",
-      "srt": {"mode": "listener", "local_address": "127.0.0.1", "local_port": 19404, "latency_ms": 120},
-      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"},
-      "egress": {"codec": "h264", "bitrate": 4000000, "preset": "ultrafast", "tune": "zerolatency",
-                 "audio_tracks": [{"codec": "aac", "layout": "stereo", "channels": [0, 1], "language": "eng"}]}
-    },
-    {
-      "id": "rx-loop50",
-      "label": "RX loop 50",
-      "direction": "ingest",
-      "srt": {"mode": "caller", "remote_host": "127.0.0.1", "remote_port": 19404, "latency_ms": 120},
-      "target": {"width": 1280, "height": 720, "scan": "progressive", "rate": "50"}
-    }
-]""")
-json.dump(c, open(sys.argv[2], "w"))
-PY
-SRTGW_WRITER_RATE=50 "$WRITER" "$WORK/mxl/src" "$SRC_ID" "$VIDEO50" 300 "$AUDIO50" marks &
-W50=$!
-PORT=18161
-SRTGW_CONFIG_FILE="$WORK/config50.json" stdbuf -oL -eL "$BIN" > "$WORK/gw.log" 2>&1 &
-GW=$!
-for _ in $(seq 1 20); do
-  api GET /channels >/dev/null 2>&1 && break
-  sleep 0.5
-done
-api POST /channels/tx50/route "{\"video_active\":true,\"video_domain\":\"$SRC_ID\",\"video_flow\":\"$VIDEO50\",\"audio_flow\":\"$AUDIO50\"}" >/dev/null
-sleep 6
 steady rx-loop50 "loop at 50p" 16 2
-kill -TERM "$GW" || true
-wait "$GW" || true
+grep '"event":"av_resync"' "$WORK/gw.log" || true
+
+kill -TERM "$GW"
+code=0
+wait "$GW" || code=$?
+GW=""
+[ "$code" = 143 ] || { echo "the gateway exited $code on SIGTERM, not 143" >&2; exit 1; }
 echo "avsync ok"
