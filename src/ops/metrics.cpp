@@ -75,6 +75,9 @@ std::string renderMetrics(ProcessMetrics const& metrics)
         out << "mxl_srt_gateway_av_resyncs_total{channel=\"" << id << "\",essence=\"audio\"} " << channel.avResyncsAudio << "\n";
         out << "mxl_srt_gateway_av_resync_jump_ms{channel=\"" << id << "\",essence=\"video\"} " << channel.avResyncJumpVideoMs << "\n";
         out << "mxl_srt_gateway_av_resync_jump_ms{channel=\"" << id << "\",essence=\"audio\"} " << channel.avResyncJumpAudioMs << "\n";
+        counter(out, "egress_repeated_frames_total", id, channel.repeatedFrames);
+        counter(out, "egress_slate_frames_total", id, channel.slateFrames);
+        counter(out, "egress_audio_silent_grains_total", id, channel.audioSilentGrains);
         gauge(out, "audio_drift_ppm", id, channel.audioDriftPpm);
         gauge(out, "audio_fifo_ms", id, channel.audioFifoMs);
         counter(out, "decode_errors_total", id, channel.decodeErrors);

@@ -187,6 +187,22 @@ std::int64_t PtsMapper::add(std::int64_t sampleNs)
     return 0;
 }
 
+EgressPicture EgressHold::decide(bool good, std::int64_t nowNs)
+{
+    if (good)
+    {
+        haveGood = true;
+        lastGoodNs = nowNs;
+        return EgressPicture::Source;
+    }
+    return haveGood && nowNs - lastGoodNs <= holdNs ? EgressPicture::Repeat : EgressPicture::Slate;
+}
+
+void EgressHold::reset()
+{
+    haveGood = false;
+}
+
 std::int64_t gapSamples(std::int64_t gapNs)
 {
     return gapNs > 2000000 && gapNs < 1000000000 ? gapNs * 48 / 1000000 : 0;

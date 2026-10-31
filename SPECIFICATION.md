@@ -344,6 +344,13 @@ corporate firewall. Therefore:
 - Missing flow → `waiting` with slate/silence encoded (the SRT output keeps
   running so the far end does not reconnect); no grains → `no_signal`, same
   behaviour.
+- A source grain that is missing, invalid, or not committed by the frame's send
+  deadline (half a grain after the output grain's tick; the audio waits until
+  the next tick) repeats the last good frame; the slate is sent only when no
+  good grain came for longer than `hold_ms` (default 500; 0: at once), and the
+  first good grain after it is sent at once. Counted in
+  `egress_repeated_frames_total` and `egress_slate_frames_total`; audio the
+  flow does not have in time is silence (`egress_audio_silent_grains_total`).
 - A re-created flow (the writer restarted: same flow id, new files) is opened
   again within about 1 s, without a channel restart: every 250 ms the egress
   checks the flow's `data` file against the device/inode it opened, and MXL's
@@ -493,7 +500,9 @@ encoder to its packet), `encode_latency_seconds` (histogram), `codec_info`
 `mxl_flow_reopens_total` (label `reason` `recreated` or `stalled`: egress
 readers opened again because their flow was re-created or its head stalled,
 §6.1), `av_resyncs_total` and `av_resync_jump_ms` (label `essence` `video` or
-`audio`: ingest re-anchors, §5.4, and the last one's size in ms), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+`audio`: ingest re-anchors, §5.4, and the last one's size in ms),
+`egress_repeated_frames_total`, `egress_slate_frames_total` and
+`egress_audio_silent_grains_total` (§6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,
@@ -575,6 +584,10 @@ Grafana dashboard in `deploy/grafana/`.
      writer behind an egress → SRT → ingest loop restarts, and an ffmpeg
      sender restarts with a new PTS base; 3 s after either the AV offset is
      back at its value before (within 25 ms and 80 ms).
+  10. A source that misses grains (`tests/integration/egress_gaps.sh`): of the
+     writer's video grains 20 % are skipped, invalid or 120 ms late; the egress
+     sends no slate, keeps its rate, and every AV mark (3 white frames and a
+     tone) reaches the ingest behind SRT whole.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01 (script or CI).
 - Hardware (documented): NVDEC/NVENC on A4000 and L4; number of concurrent
   1080p50 ingest and egress channels per GPU; end-to-end latency

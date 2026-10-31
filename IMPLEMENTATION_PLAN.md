@@ -336,7 +336,7 @@ both.
     rename, then opens the existing flow and locks it). Writers are created
     under a mutex that the collection takes too; a failed create is retried
     once. Test: `tests/integration/startup.sh`.
-17. **Lip sync after a source restart (unreleased).** A source behind an
+17. **Lip sync after a source restart (1.4.5).** A source behind an
     egress restarted; the egress sent no audio while the audio flow was not
     open, FFmpeg's interleaver held the video and the TS muxer the last audio,
     which then reached the ingest about 1.2–1.8 s late in one batch. The
@@ -347,6 +347,15 @@ both.
     are stepped. Re-anchors log `av_resync` and count in
     `av_resyncs_total{essence}`. Tests: unit cases in `tests/unit/test_logic.cpp`
     and `tests/integration/avsync.sh` (with `mxl-srt-avsync-check`).
+18. **Missing source grains on egress (unreleased).** A source grain that was
+    missing, invalid or not committed within the wait was replaced by the
+    slate, which broke an analyzer's flash windows behind SRT; the waits
+    (40 ms each) could exceed a frame. Now `EgressHold`
+    (`src/media/framesync.cpp`) repeats the last good frame up to `hold_ms`,
+    then sends the slate; the waits end at the frame's send deadline (half a
+    grain after its tick). Counters `egress_repeated_frames_total`,
+    `egress_slate_frames_total`, `egress_audio_silent_grains_total`. Tests: a
+    unit case and `tests/integration/egress_gaps.sh`.
 
 ## MXL calls that matter
 

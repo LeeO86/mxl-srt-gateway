@@ -2042,6 +2042,19 @@ void EgressPipeline::run()
     std::uint64_t drops = 0;
     std::uint64_t lastSource = 0;
     bool haveSource = false;
+    // A source grain that is missing, invalid or late repeats the last good frame, up to hold_ms
+    // (EgressHold); `held` is that frame, copied when the first grain after it fails.
+    EgressHold hold;
+    hold.holdNs = static_cast<std::int64_t>(config_.holdMs) * 1000000LL;
+    std::vector<std::uint8_t> held;
+    bool heldValid = false;
+    std::uint64_t heldIndex = 0;
+    VideoFormat heldFormat;
+    VideoFormat lastFormat;
+    bool lastWoven = false;
+    std::uint64_t repeatedFrames = 0;
+    std::uint64_t slateFrames = 0;
+    std::uint64_t audioSilentGrains = 0;
     auto const started = std::chrono::steady_clock::now();
     std::int64_t lastJpeg = 0;
 
@@ -2336,6 +2349,16 @@ void EgressPipeline::run()
         // The PTS follow the output grain's time, so grains skipped by a loop that fell behind leave
         // a gap. A counter ran slow instead, and the receiver mapped the stream later and later.
         videoPts = static_cast<std::int64_t>(index - firstIndex);
+        // Waits for the source end at the frame's send deadline, half a grain after its tick (the
+        // other half is the encoder's), and for its audio at the next tick: a source that commits
+        // late costs a repeated frame, never a skipped output grain.
+        std::uint64_t const tickNs = grainTimeNs(config_.target.rate, index);
+        std::uint64_t const nextTickNs = grainTimeNs(config_.target.rate, index + 1);
+        std::uint64_t const videoDeadlineNs = tickNs + (nextTickNs - tickNs) / 2;
+        auto const budget = [](std::uint64_t deadlineNs) -> std::uint64_t {
+            std::uint64_t const now = taiNowNs();
+            return now < deadlineNs ? deadlineNs - now : 0;
+        };
         auto const videoRoute = routes_(true);
         auto const audioRoute = routes_(false);
         // Video and audio are read this many source frames before the output grain's time.
@@ -2358,6 +2381,8 @@ void EgressPipeline::run()
             videoReader.close();
             audioReader.close();
             openDomain.reset();
+            hold.reset();
+            heldValid = false;
             openRoute = routeKey;
             openReason = "activation";
             nextOpen = {};
@@ -2467,21 +2492,22 @@ void EgressPipeline::run()
                     fieldRate.num *= 2;
                     if (sync)
                     {
-                        sync->waitFor(fieldGrains ? grainTimeNs(fieldRate, srcIndex * 2 + 1) : grainTimeNs(source.rate, srcIndex), 40000000);
+                        sync->waitFor(fieldGrains ? grainTimeNs(fieldRate, srcIndex * 2 + 1) : grainTimeNs(source.rate, srcIndex), budget(videoDeadlineNs));
                     }
                     bool invalid = false;
                     std::uint8_t const* grain = nullptr;
                     std::size_t grainSize = 0;
                     // In place: the loop is done with the grain long before the writer comes
                     // round to its slot again.
-                    bool haveGrain = videoReader.view(fieldGrains ? srcIndex * 2 : srcIndex, 40000000, &grain, &grainSize, &invalid) && !invalid;
+                    bool haveGrain =
+                        videoReader.view(fieldGrains ? srcIndex * 2 : srcIndex, budget(videoDeadlineNs), &grain, &grainSize, &invalid) && !invalid;
                     if (haveGrain && fieldGrains)
                     {
                         auto const stride = v210Stride(source.width);
                         std::size_t const fieldBytes = stride * static_cast<std::size_t>(source.height / 2);
                         std::uint8_t const* second = nullptr;
                         std::size_t secondSize = 0;
-                        haveGrain = grainSize >= fieldBytes && videoReader.view(srcIndex * 2 + 1, 40000000, &second, &secondSize, &invalid) && !invalid &&
+                        haveGrain = grainSize >= fieldBytes && videoReader.view(srcIndex * 2 + 1, budget(videoDeadlineNs), &second, &secondSize, &invalid) && !invalid &&
                                secondSize >= fieldBytes;
                         if (haveGrain)
                         {
@@ -2508,6 +2534,8 @@ void EgressPipeline::run()
                         }
                         lastSource = srcIndex;
                         haveSource = true;
+                        lastFormat = source;
+                        lastWoven = fieldGrains;
                     }
                     else
                     {
@@ -2518,6 +2546,44 @@ void EgressPipeline::run()
                 {
                     state = "waiting";
                 }
+            }
+        }
+        if (!routeKey.empty())
+        {
+            auto const choice = hold.decide(live, static_cast<std::int64_t>(tickNs));
+            if (choice == EgressPicture::Repeat && (!heldValid || heldIndex != lastSource))
+            {
+                // The first grain after the last good one failed: keep a copy of that one (the
+                // source's ring may reuse its slot before the hold ends).
+                heldValid = false;
+                std::uint8_t const* last = nullptr;
+                std::size_t lastSize = 0;
+                bool lastInvalid = false;
+                if (lastWoven && woven.size() == v210Size(lastFormat.width, lastFormat.height))
+                {
+                    held = woven;
+                    heldValid = true;
+                }
+                else if (!lastWoven && videoReader.isOpen() && videoReader.view(lastSource, 0, &last, &lastSize, &lastInvalid) && !lastInvalid)
+                {
+                    held.assign(last, last + lastSize);
+                    heldValid = true;
+                }
+                heldIndex = lastSource;
+                heldFormat = lastFormat;
+            }
+            if (choice == EgressPicture::Repeat && heldValid)
+            {
+                picture = held.data();
+                pictureSize = held.size();
+                source = heldFormat;
+                live = true;
+                state = "running";
+                ++repeatedFrames;
+            }
+            else if (choice != EgressPicture::Source)
+            {
+                ++slateFrames;
             }
         }
         if (!live)
@@ -2708,8 +2774,10 @@ void EgressPipeline::run()
             std::uint64_t const end = static_cast<std::uint64_t>(sampleIndexAtGrain(static_cast<std::int64_t>(index + 1), config_.target.rate.num, config_.target.rate.den) -
                                                                  sampleIndexAtGrain(offset, rate.num, rate.den));
             std::vector<float> interleaved;
-            if (!audioReader.read(end, sampleCount, 20000000, interleaved))
+            if (!audioReader.read(end, sampleCount, std::min<std::uint64_t>(20000000, budget(nextTickNs)), interleaved))
             {
+                // Silence for samples the open flow did not have by then (missing, late).
+                audioSilentGrains += audioReader.isOpen() ? 1 : 0;
                 interleaved.assign(static_cast<std::size_t>(sampleCount * std::max(1, audioReader.channels())), 0.f);
             }
             int const srcChannels = std::max(1, audioReader.channels());
@@ -2792,6 +2860,9 @@ void EgressPipeline::run()
         status.drops = drops;
         status.flowReopensRecreated = reopensRecreated;
         status.flowReopensStalled = reopensStalled;
+        status.repeatedFrames = repeatedFrames;
+        status.slateFrames = slateFrames;
+        status.audioSilentGrains = audioSilentGrains;
         status.encodeFps = frames / std::max(0.001, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
         status.encodeLatencyCount = status_.encodeLatencyCount;
         status.encodeLatencySum = status_.encodeLatencySum;

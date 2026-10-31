@@ -18,12 +18,17 @@
 // tone's first sample (TAI, ms within the period: how far the chain re-stamped a mark that was
 // made on a TAI multiple of the period), av_ms (audio minus video) and unix_s, the wall clock
 // when the mark was found.
-// Usage: mxl-srt-avsync-check <domain-dir> <video-flow> <audio-flow> <seconds> [period-s]
+// With [run-frames] (mxl-srt-flow-writer "marks": 3), a mark is the end of a run of white frames,
+// and its line also has `run` (white frames) and `valid`: the run is run-frames +-1 long and no
+// slate frame (the egress's NO SIGNAL picture, mid-grey) lies within 2 frames before it or right
+// after it, as an analyzer needs the frames of its flash window. At the end one summary line:
+// marks found, valid marks, slate frames seen.
+// Usage: mxl-srt-avsync-check <domain-dir> <video-flow> <audio-flow> <seconds> [period-s] [run-frames]
 int main(int argc, char** argv)
 {
     if (argc < 5)
     {
-        std::cerr << "usage: mxl-srt-avsync-check <domain-dir> <video-flow> <audio-flow> <seconds> [period-s]\n";
+        std::cerr << "usage: mxl-srt-avsync-check <domain-dir> <video-flow> <audio-flow> <seconds> [period-s] [run-frames]\n";
         return 2;
     }
     using namespace srtgw;
@@ -31,6 +36,7 @@ int main(int argc, char** argv)
     std::string const audioFlow = argv[3];
     int const seconds = std::atoi(argv[4]);
     std::int64_t const periodNs = (argc > 5 ? std::atoll(argv[5]) : 5) * 1000000000LL;
+    int const runFrames = argc > 6 ? std::atoi(argv[6]) : 0;
     try
     {
         MxlDomain domain(argv[1], "avsync-check", 1000000000, false);
@@ -45,6 +51,17 @@ int main(int argc, char** argv)
         std::int64_t videoMark = -1;
         std::int64_t audioMark = -1;
         std::vector<float> block;
+        // Run mode: the white run being read, the last slate frame, the run of the pending mark.
+        std::int64_t runStartNs = 0;
+        int run = 0;
+        bool runSlate = false;
+        std::uint64_t lastSlate = 0;
+        bool haveSlate = false;
+        int markRun = 0;
+        bool markValid = false;
+        int marks = 0;
+        int validMarks = 0;
+        int slateFrames = 0;
         while (elapsed() < seconds)
         {
             if (video.isOpen() && video.replaced())
@@ -88,12 +105,44 @@ int main(int argc, char** argv)
                     std::memcpy(&word, row + static_cast<std::size_t>(g) * 16, 4);
                     sum += (word >> 10) & 0x3ff;
                 }
-                bool const now = groups > 0 && sum / static_cast<std::uint64_t>(groups) > 500;
-                if (now && !bright)
+                std::uint64_t const luma = groups > 0 ? sum / static_cast<std::uint64_t>(groups) : 0;
+                bool const now = luma > 500;
+                if (runFrames <= 0)
                 {
-                    videoMark = static_cast<std::int64_t>(grainTimeNs(format.rate, nextGrain));
+                    if (now && !bright)
+                    {
+                        videoMark = static_cast<std::int64_t>(grainTimeNs(format.rate, nextGrain));
+                    }
+                    bright = now;
+                    continue;
                 }
-                bright = now;
+                // Dark is 64, the slate 128, white 940.
+                bool const slate = luma > 100 && luma < 400;
+                if (now)
+                {
+                    if (run == 0)
+                    {
+                        runStartNs = static_cast<std::int64_t>(grainTimeNs(format.rate, nextGrain));
+                        runSlate = haveSlate && nextGrain - lastSlate <= 2;
+                    }
+                    ++run;
+                    continue;
+                }
+                if (run > 0)
+                {
+                    videoMark = runStartNs;
+                    markRun = run;
+                    markValid = !runSlate && !slate && std::abs(run - runFrames) <= 1;
+                    ++marks;
+                    validMarks += markValid ? 1 : 0;
+                    run = 0;
+                }
+                if (slate)
+                {
+                    lastSlate = nextGrain;
+                    haveSlate = true;
+                    ++slateFrames;
+                }
             }
             int const channels = audio.channels();
             while (nextSample + 480 <= audio.head())
@@ -124,8 +173,13 @@ int main(int argc, char** argv)
                 if (std::llabs(audioMark - videoMark) < periodNs / 2)
                 {
                     double const unixS = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-                    std::printf("{\"unix_s\":%.2f,\"video_ms\":%.1f,\"audio_ms\":%.1f,\"av_ms\":%.1f}\n", unixS, static_cast<double>(videoMark % periodNs) / 1e6,
+                    std::printf("{\"unix_s\":%.2f,\"video_ms\":%.1f,\"audio_ms\":%.1f,\"av_ms\":%.1f", unixS, static_cast<double>(videoMark % periodNs) / 1e6,
                         static_cast<double>(audioMark % periodNs) / 1e6, static_cast<double>(audioMark - videoMark) / 1e6);
+                    if (runFrames > 0)
+                    {
+                        std::printf(",\"run\":%d,\"valid\":%s", markRun, markValid ? "true" : "false");
+                    }
+                    std::printf("}\n");
                     std::fflush(stdout);
                     videoMark = -1;
                     audioMark = -1;
@@ -140,6 +194,10 @@ int main(int argc, char** argv)
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (runFrames > 0)
+        {
+            std::printf("{\"summary\":true,\"marks\":%d,\"valid\":%d,\"slate_frames\":%d}\n", marks, validMarks, slateFrames);
         }
     }
     catch (std::exception const& ex)

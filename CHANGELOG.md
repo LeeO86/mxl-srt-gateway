@@ -4,6 +4,12 @@
 
 ### Fixes
 
+- An egress whose MXL source missed a grain (not written, written invalid, or committed after the egress's wait) sent its slate for that output frame, so a source under load put slate frames between real ones (platform: an AV-sync analyzer behind SRT lost about 3 of 4 events, slates inside its flash and QR windows). It waited up to 40 ms for the sync group and 40 ms per field grain, more than a 50p frame, so a source that committed late could also make it fall more than 4 grains behind and skip output grains. Now:
+  - a missing, invalid or late source grain repeats the last good frame; the slate is sent only when no good grain came for longer than the channel's `hold_ms` (default 500 ms, as on ingest; 0 keeps the old behaviour). 500 ms rides out a source that misses one grain in five, shows a real loss within half a second, and is shorter than the 1 s grain history the repeated frame is copied from (it is copied once, when the first grain after it fails);
+  - the waits end at the frame's send deadline, half a grain after its tick (the audio at the next tick), so a late source costs a repeat, never a skipped grain.
+  - Audio was and stays silence for samples the open flow does not have in time (repeating audio would be heard); it is now counted.
+  Measured with `tests/integration/egress_gaps.sh` (720p25 MXL writer, 20 % of its video grains skipped, invalid or 120 ms late; egress H.264 + AAC → SRT → ingest; 42 s, AV marks of 3 white frames and a tone every 5 s): 1.4.5 9 marks, 0 whole, 198 slate frames at the ingest; now 8 of 8 whole, 0 slate frames, 200 repeated frames, AV +7…+8 ms. With the egress at 1080p50 (veryfast): 1.4.5 1 of 10 whole, 192 slate frames; now 8 of 8, 0. With 60 % bad grains: 1.4.5 0 of 8 whole, 523 slate frames; now no slate frame (5 of 7 marks whole; the others the source itself lengthened). No output grain was skipped on the lab host in either version (25.2 and 50.5 frames/s), so the fall-behind itself was not reproduced here.
+
 - A gateway with two or more egress channels did not stop on SIGTERM: it hung until Kubernetes killed it after the grace period (30 s in the examples; on the lab host still running after 90 s, also in 1.4.5). The channels were stopped one after another while holding the channel manager's lock, and an egress asks `route()`, which takes that lock, on every grain: the second egress blocked there while the first was being stopped, and was never told to stop. The channels are now taken out under the lock and stopped outside it, all asked at once so they end in parallel; a channel removed or changed at run time is stopped outside the lock too (the same deadlock could hit an egress there). Also in the stop path:
   - `interruptSrt()` releases the listeners' epolls; a listener waiting in `acceptOne` then polled the released epoll again and again (about 20 000 "EID INVALID" lines) until its channel was stopped. It now gives up on any epoll error but the timeout;
   - the reconnect backoff of egress and ingest links (up to 10 s) slept through a stop; it now wakes within 20 ms;
@@ -13,7 +19,13 @@
 
 ### Added
 
+- Metrics `mxl_srt_gateway_egress_repeated_frames_total{channel}`, `mxl_srt_gateway_egress_slate_frames_total{channel}` (slate sent while routed) and `mxl_srt_gateway_egress_audio_silent_grains_total{channel}`; the channel status has `repeated_frames`, `slate_frames` and `audio_silent_grains`. The egress form in the UI has `hold_ms` ("Repeat the last frame for ms").
+- `tests/integration/egress_gaps.sh` (in CI). `mxl-srt-flow-writer … marks [miss-percent] [late-ms]` skips, invalidates or delays that share of its video grains; its marks are now 3 white frames. `mxl-srt-avsync-check … [run-frames]` checks each mark's white run and counts the slate frames around it.
 - `tests/integration/stop.sh` (in CI).
+
+### Notes for the platform
+
+- An egress with a source that misses grains now shows repeated frames instead of slate frames: watch `egress_repeated_frames_total`; `egress_slate_frames_total` rises only on a real loss (over `hold_ms`), or while a route waits for its flow.
 
 ## 1.4.5
 
