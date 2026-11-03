@@ -13,7 +13,7 @@ VERIFY="${2:-$(dirname "$BIN")/mxl-srt-flow-verify}"
 WORK="$(mktemp -d)"
 GW=""
 SRC=""
-trap 'rc=$?; [ "$rc" = 0 ] || tail -n 40 "$WORK/gw.log" >&2 || true; kill $GW $SRC 2>/dev/null || true; rm -rf "$WORK"' EXIT
+trap 'rc=$?; [ "$rc" = 0 ] || tail -n 40 "$WORK/gw.log" >&2 || true; kill $GW $SRC 2>/dev/null || true; wait $GW 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 cat > "$WORK/config.json" <<EOF
 {
