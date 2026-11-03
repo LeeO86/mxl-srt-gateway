@@ -1035,6 +1035,62 @@ TEST_CASE("a gap in the source audio is filled with silence, rounding and jumps 
     CHECK(gapSamples(2000000000) == 0);
 }
 
+TEST_CASE("an MPEG-TS timestamp wrap after 26.5 h is undone, not stepped")
+{
+    std::int64_t const range = std::int64_t{1} << 33;
+    PtsUnwrap video;
+    CHECK(video.add(range - 3600) == range - 3600);
+    CHECK(video.add(range - 1800) == range - 1800);
+    // Wrapped: continues past 2^33.
+    CHECK(video.add(0) == range);
+    CHECK(video.add(1800) == range + 1800);
+    // A DTS from before the wrap, then the PTS after it (B-frames around the wrap).
+    PtsUnwrap mixed;
+    CHECK(mixed.add(range - 100) == range - 100);
+    CHECK(mixed.add(5) == range + 5);
+    CHECK(mixed.add(range - 50) == range - 50);
+    CHECK(mixed.add(10) == range + 10);
+    // Small steps back (reordering, a restart near the start) are no wrap.
+    PtsUnwrap small;
+    CHECK(small.add(900000) == 900000);
+    CHECK(small.add(0) == 0);
+    // No wrap bits known: unchanged.
+    PtsUnwrap none;
+    none.bits = 64;
+    CHECK(none.add(INT64_MAX - 1) == INT64_MAX - 1);
+}
+
+TEST_CASE("a video mapping step moves the queued audio up to 1 s, beyond it the queue starts again")
+{
+    std::int64_t const ms = 1000000;
+    CHECK(mapShiftSamples(100 * ms) == 4800);
+    CHECK(mapShiftSamples(1000 * ms) == 48000);
+    CHECK(mapShiftSamples(-40000 * ms) == -1920000);
+    CHECK(mapShiftSamples(1000 * ms + 1) == kClearQueue);
+    // 1.4.6 on test-all-srt: the 33-bit wrap, 95 443 718 ms, inserted 18 GB of silence per channel.
+    CHECK(mapShiftSamples(95443718 * ms) == kClearQueue);
+}
+
+TEST_CASE("audio aligner holds at most 1 s, whatever the lateness")
+{
+    std::int64_t const ms = 1000000;
+    AudioAligner aligner;
+    auto window = [&](std::int64_t lateNs) {
+        std::int64_t moved = 0;
+        for (int grain = 0; grain < aligner.window; ++grain)
+        {
+            moved += aligner.add(0, grain == aligner.window - 1 ? lateNs : INT64_MIN);
+        }
+        return moved;
+    };
+    CHECK(window(-100 * ms) == 0);
+    REQUIRE(aligner.aligned);
+    // Audio stamped 26.5 h late (its PTS wrapped before the video's): held 1 s, not 26.5 h.
+    CHECK(window(95443718 * ms) == 0);
+    CHECK(window(95443718 * ms) == -48000);
+    CHECK(aligner.holdNs == aligner.maxHoldNs);
+}
+
 TEST_CASE("channel map applies gain and silence")
 {
     std::vector<float> stereo(8);

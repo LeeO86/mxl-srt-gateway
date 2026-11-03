@@ -104,7 +104,7 @@ std::int64_t AudioAligner::add(std::int64_t errorNs, std::int64_t lateNs)
     std::int64_t const before = holdNs;
     // Audio that is missing from the source is no reason to hold, nor to drop the hold.
     bool const arrived = needNs != INT64_MIN;
-    std::int64_t const need = arrived ? std::max<std::int64_t>(0, needNs + marginNs) : 0;
+    std::int64_t const need = arrived ? std::clamp<std::int64_t>(needNs + marginNs, 0, maxHoldNs) : 0;
     std::int64_t const released = std::max<std::int64_t>(0, holdNs - releaseNs);
     // Beyond stepNs the hold follows the need only when two windows in a row ask for it: one late
     // batch is not held, and a source whose bursts vary does not make it pump.
@@ -188,6 +188,26 @@ std::int64_t PtsMapper::add(std::int64_t sampleNs)
     return 0;
 }
 
+std::int64_t PtsUnwrap::add(std::int64_t value)
+{
+    if (bits <= 0 || bits >= 63)
+    {
+        return value;
+    }
+    std::int64_t const range = std::int64_t{1} << bits;
+    if (seen && value < last - range / 2)
+    {
+        offset += range;
+    }
+    else if (seen && value > last + range / 2)
+    {
+        offset -= range;
+    }
+    seen = true;
+    last = value;
+    return value + offset;
+}
+
 void VideoPhase::add(std::int64_t delayNs, std::int64_t grainNs)
 {
     double const sample = static_cast<double>(std::clamp<std::int64_t>(delayNs, 0, grainNs));
@@ -224,5 +244,10 @@ void EgressHold::reset()
 std::int64_t gapSamples(std::int64_t gapNs)
 {
     return gapNs > 2000000 && gapNs < 1000000000 ? gapNs * 48 / 1000000 : 0;
+}
+
+std::int64_t mapShiftSamples(std::int64_t stepNs)
+{
+    return stepNs > 1000000000 ? kClearQueue : stepNs * 48 / 1000000;
 }
 } // namespace srtgw

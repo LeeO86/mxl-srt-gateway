@@ -178,14 +178,15 @@ grid (measured on the frames shown, about 20 frames' mean). The mapping follows 
 `sync_latency_ms` instead of moving it; it moves by at most 1 ms per window for
 a drifting source and steps only when it is off by more than
 max(40 ms, `sync_latency_ms` / 2) for two windows, and the queued audio steps
-with it. A gap in the source audio's timestamps is filled with silence where it
+with it (a step above 1 s clears the audio queues instead). The 33-bit MPEG-TS
+PTS wrap every 26.5 h is undone on ingest, so it is no step. A gap in the source audio's timestamps is filled with silence where it
 is. At the start the gateway drops or inserts samples until the error
 is within 20 ms. After that the resampler plays the audio up to 0.5 % faster or
 slower, so a drifting source or a decoder that falls behind does not click. An
 error beyond `av_resync_ms` (default 40, 40–1000; a timestamp jump, a long
 stall, a source restart) is stepped again at once. Audio that arrives in bursts
 later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer does that) is held back as
-late as it arrived, and released slowly, and the video waits as long (up to
+late as it arrived (at most 1 s), and released slowly, and the video waits as long (up to
 80 ms): a little later, in lip sync, rather than with gaps. A rise or fall of
 that hold by more than `av_resync_ms` is made only when two windows of 25
 grains in a row ask for it, and then at once: one late batch of audio (what a

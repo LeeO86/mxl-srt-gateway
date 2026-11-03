@@ -256,7 +256,7 @@ https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
     40–1000; a jump in the source timestamps, a long stall, a source restart)
     is stepped again at once, and the alignment starts over;
   - the audio is held as late as the latest audio of those grains arrived for
-    its due time, plus 10 ms: a rise is inserted at once and the video waits
+    its due time, plus 10 ms, at most 1 s: a rise is inserted at once and the video waits
     as long (up to 80 ms, the first track's hold); when less would do, the hold
     shrinks by at most 0.5 ms per 25 grains. A source that sends its audio in
     bursts later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer) plays a little
@@ -269,6 +269,11 @@ https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
     each step of the video mapping is a resync: log `av_resync` (`channel`,
     `essence`, `track`, `jump_ms`, + later), metrics `av_resyncs_total` and
     `av_resync_jump_ms` (§9), channel status `av_resyncs`;
+  - a step of the video mapping moves the queued audio with it; a step above
+    1 s (a source restart, a timestamp jump) clears the audio queues instead.
+    Every packet's PTS and DTS are unwrapped first (MPEG-TS: 33 bits at 90 kHz,
+    a wrap every 26.5 h; FFmpeg undoes it only for a stream that started more
+    than 60 s into the range), so the wrap is no step;
   - a gap in the source's audio timestamps (a sender that skipped grains, lost
     packets) is filled with silence where it is, so the queued audio keeps its
     times; audio that is missing is no reason to hold.
