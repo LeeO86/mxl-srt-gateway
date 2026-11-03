@@ -186,7 +186,7 @@ slower, so a drifting source or a decoder that falls behind does not click. An
 error beyond `av_resync_ms` (default 40, 40–1000; a timestamp jump, a long
 stall, a source restart) is stepped again at once. Audio that arrives in bursts
 later than `sync_latency_ms` (FFmpeg's MPEG-TS muxer does that) is held back as
-late as it arrived, and released slowly, and the video waits as long (up to
+late as it arrived (at most 1 s), and released slowly, and the video waits as long (up to
 80 ms): a little later, in lip sync, rather than with gaps. A rise or fall of
 that hold by more than `av_resync_ms` is made only when two windows of 25
 grains in a row ask for it, and then at once: one late batch of audio (what a
