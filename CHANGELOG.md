@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.7
+
+### Fixes
+
+- An ingest ran out of memory 26.5 h after its source started (platform: `test-all-srt` OOMKilled at its 4 GiB limit, flat at about 196 MiB until the last minute). The MPEG-TS PTS is 33 bits at 90 kHz and wraps to 0 after 2^33 / 90 000 s = 26.51 h. FFmpeg's demuxer undoes that only for a stream that started more than 60 s into the range; a source that starts at 0, such as the gateway's own egress, wrapped as is. The ingest's PTS mapping then stepped by 26.5 h (`av_resync` video `jump_ms` 95443718), and the audio writer put that step as silence before each audio queue: 4.6 × 10⁹ samples, about 18 GB per channel. Now:
+  - the ingest undoes the wrap on every packet's PTS and DTS (a value more than half the range below the last one has wrapped), so the wrap is no step at all;
+  - a video mapping step above 1 s clears the audio queues instead of shifting them (a source restart or a timestamp jump); up to 1 s they move with the video as before;
+  - the audio aligner holds at most 1 s, however late the audio is stamped.
+  Measured with `tests/integration/pts_wrap.sh` (720p25 x264 + AAC over SRT into one ingest): a source that starts 4 s before the wrap ran in 1.4.6 and runs now (peak RSS 152 MiB, no step); a source that starts at 0 and jumps to 4 s before the wrap in the same connection killed 1.4.6 at the wrap (`jump_ms` 95443671, killed at the 3 GiB test limit) and runs now (peak 162 MiB, grains and audio written after the wrap).
+- The Compose and Kubernetes examples use the `1.4.7` image.
+
 ## 1.4.6
 
 ### Fixes

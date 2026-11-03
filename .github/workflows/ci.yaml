@@ -27,7 +27,7 @@ jobs:
             libsrt-gnutls-dev libgnutls28-dev nettle-dev \
             libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev \
             libswresample-dev libswscale-dev libx264-dev libsoxr-dev \
-            ffmpeg
+            ffmpeg srt-tools
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -90,6 +90,9 @@ jobs:
 
       - name: SRT reconnect
         run: tests/integration/reconnect.sh ./build/mxl-srt-gateway
+
+      - name: Source PTS wrap after 26.5 h
+        run: tests/integration/pts_wrap.sh ./build/mxl-srt-gateway
 
       - name: Lip sync after a source restart
         run: tests/integration/avsync.sh ./build/mxl-srt-gateway

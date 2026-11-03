@@ -1129,6 +1129,7 @@ void IngestPipeline::runIo()
         mapper.stepNs = std::max<std::int64_t>(40000000, static_cast<std::int64_t>(config_.syncLatencyMs) * 500000LL);
         // TAI arrival of each video packet by its PTS (ns), for the codec delay.
         std::map<std::int64_t, std::int64_t> arrivals;
+        std::vector<PtsUnwrap> unwrap;
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
         AVFrame* filtered = av_frame_alloc();
@@ -1142,6 +1143,26 @@ void IngestPipeline::runIo()
             if (read < 0)
             {
                 break;
+            }
+            // The 33-bit MPEG-TS PTS wraps every 26.5 h. FFmpeg undoes that only for a stream that
+            // started more than 60 s into the range; here it is undone for every stream.
+            if (packet->stream_index >= 0)
+            {
+                auto const index = static_cast<std::size_t>(packet->stream_index);
+                while (unwrap.size() <= index)
+                {
+                    PtsUnwrap stream;
+                    stream.bits = fmt->streams[unwrap.size()]->pts_wrap_bits;
+                    unwrap.push_back(stream);
+                }
+                if (packet->pts != AV_NOPTS_VALUE)
+                {
+                    packet->pts = unwrap[index].add(packet->pts);
+                }
+                if (packet->dts != AV_NOPTS_VALUE)
+                {
+                    packet->dts = unwrap[index].add(packet->dts);
+                }
             }
             if (packet->stream_index == videoStream)
             {
@@ -1606,7 +1627,7 @@ void IngestPipeline::runClock()
             auto const audioOffsetNs = static_cast<std::int64_t>(config_.audioOffsetMs * 1000000.0);
             // The video mapping stepped (PtsMapper): the queued audio moves with the video at once,
             // + later (silence before it), - earlier (its head dropped).
-            std::int64_t const mapStep = shared_->mapStepNs * 48 / 1000000;
+            std::int64_t const mapStep = mapShiftSamples(shared_->mapStepNs);
             shared_->mapStepNs = 0;
             shared_->videoPhaseNs = phase.valid ? phase.value(grainNs) : -1;
             for (std::size_t q = 0; q < shared_->audio.size(); ++q)
@@ -1614,6 +1635,11 @@ void IngestPipeline::runClock()
                 auto& live = shared_->audio[q];
                 if (live.channels <= 0 || live.samples.empty())
                 {
+                    continue;
+                }
+                if (mapStep == kClearQueue)
+                {
+                    live.samples.clear();
                     continue;
                 }
                 if (mapStep > 0)

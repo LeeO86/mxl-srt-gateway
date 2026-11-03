@@ -63,6 +63,8 @@ struct AudioAligner
     std::int64_t stepNs = 40000000;
     std::int64_t horizonNs = 2000000000;
     std::int64_t marginNs = 10000000;
+    // The hold never exceeds this: a source timestamp jump is no reason to insert hours of silence.
+    std::int64_t maxHoldNs = 1000000000;
     std::int64_t releaseNs = 500000;
     double maxSpeed = 0.005;
     std::int64_t sumNs = 0;
@@ -104,6 +106,19 @@ struct PtsMapper
 
     // Adds a frame's TAI - PTS; returns how far the offset stepped (0 when it did not).
     [[nodiscard]] std::int64_t add(std::int64_t sampleNs);
+};
+
+// Undoes the wrap of one stream's packet timestamps (MPEG-TS: 33 bits at 90 kHz, every 26.5 h).
+// A value more than half the range below the last one has wrapped; more than half above, it is
+// from before the wrap (a DTS before its PTS). Without it the mapping stepped by 26.5 h (1.4.6).
+struct PtsUnwrap
+{
+    int bits = 33;
+    std::int64_t offset = 0;
+    std::int64_t last = 0;
+    bool seen = false;
+
+    [[nodiscard]] std::int64_t add(std::int64_t value);
 };
 
 // Ingest: how long after its mapped time + sync_latency_ms the synchroniser shows a frame, on
@@ -151,4 +166,10 @@ struct EgressHold
 // ends: a gap in the source timestamps (lost or skipped frames) then keeps the queued samples on
 // their times. Below 2 ms it is rounding; beyond 1 s it is a jump, which the aligner steps.
 [[nodiscard]] std::int64_t gapSamples(std::int64_t gapNs);
+
+// The video mapping stepped by `stepNs`: samples (48 kHz) of silence to put before the queued
+// audio (> 0) or to drop from its head (< 0). Beyond 1 s it is kClearQueue: the queue starts
+// again (1.4.6 inserted the step, 26.5 h or 18 GB per channel, and ran out of memory).
+inline constexpr std::int64_t kClearQueue = INT64_MAX;
+[[nodiscard]] std::int64_t mapShiftSamples(std::int64_t stepNs);
 } // namespace srtgw
