@@ -37,7 +37,7 @@ std::string hostPart(std::string const& host)
 }
 } // namespace
 
-std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret)
+std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret, std::string const& publicHost)
 {
     int const latency = srt.latencyMs > 0 ? srt.latencyMs : 200;
     // No port, no URL (the UI hides the row).
@@ -54,7 +54,8 @@ std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool 
     else
     {
         bool const anyAddress = srt.localAddress.empty() || srt.localAddress == "0.0.0.0" || srt.localAddress == "::";
-        url = "srt://" + hostPart(!anyAddress ? srt.localAddress : !host.empty() ? host : primaryIpv4()) + ":" + std::to_string(srt.localPort);
+        url = "srt://" + hostPart(!publicHost.empty() ? publicHost : !anyAddress ? srt.localAddress : !host.empty() ? host : primaryIpv4()) + ":"
+            + std::to_string(srt.localPort);
         url += srt.mode == "rendezvous" ? "?mode=rendezvous" : "?mode=caller";
         if (srt.mode == "listener" && !srt.acceptedStreamIds.empty())
         {

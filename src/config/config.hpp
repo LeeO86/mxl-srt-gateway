@@ -133,6 +133,9 @@ struct Config
     // Address announced to NMOS, the UI and remote SRT callers.
     // NMOS_HOST_ADDRESS, or SRTGW_PUBLIC_IP when that is unset.
     std::string hostAddress;
+    // SRT_PEER_URL_HOST: host in the peer URLs (status, UI) instead of the channel's or the
+    // announced address, e.g. a node or edge name outside a pod network. Empty: not used.
+    std::string peerUrlHost;
     std::int64_t historyDurationNs = 1000000000;
     std::string stateDir = "/config";
     int shutdownTimeoutS = 10;

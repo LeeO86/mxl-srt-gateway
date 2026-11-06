@@ -317,7 +317,7 @@ std::vector<std::string> globalKeys()
     return {"HOST_ID", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR", "MXL_OUTPUT_DOMAIN_ID", "DECODER", "ENCODER", "SRT_PORT_RANGE",
         "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_QUERY_ADDRESS", "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED",
         "NMOS_LABEL", "NMOS_TAGS", "WEB_PORT", "LOG_LEVEL", "NMOS_HOST_ADDRESS", "SRTGW_PUBLIC_IP", "MXL_HISTORY_DURATION_MS",
-        "SRTGW_HISTORY_DURATION_NS", "STATE_DIR", "SHUTDOWN_TIMEOUT_S", "MXL_CLEANUP_ON_EXIT", "WIDGET_FRAME_ANCESTORS"};
+        "SRTGW_HISTORY_DURATION_NS", "SRT_PEER_URL_HOST", "STATE_DIR", "SHUTDOWN_TIMEOUT_S", "MXL_CLEANUP_ON_EXIT", "WIDGET_FRAME_ANCESTORS"};
 }
 
 bool isRestartKey(std::string const& key)
@@ -656,6 +656,11 @@ LoadedConfig loadFromSources(std::map<std::string, std::string> const& fileValue
     else if (!hostSet && !aliasSet && !isAnnounceIpv4(loaded.config.hostAddress))
     {
         log::warn("announce_address_loopback", {{"address", loaded.config.hostAddress}, {"detail", "set NMOS_HOST_ADDRESS to the pod or node IP"}});
+    }
+    loaded.config.peerUrlHost = take("SRT_PEER_URL_HOST", "");
+    if (loaded.config.peerUrlHost.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:") != std::string::npos)
+    {
+        error += "SRT_PEER_URL_HOST must be a host name or an IP address; ";
     }
     auto const historyMsSet = envValues.count("MXL_HISTORY_DURATION_MS") != 0 || fileValues.count("MXL_HISTORY_DURATION_MS") != 0;
     auto const historyNsSet = envValues.count("SRTGW_HISTORY_DURATION_NS") != 0 || fileValues.count("SRTGW_HISTORY_DURATION_NS") != 0;

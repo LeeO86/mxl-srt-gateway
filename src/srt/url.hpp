@@ -14,7 +14,8 @@ namespace srtgw
 // - rendezvous: srt://<host>:<local_port>?mode=rendezvous&latency=<ms>. The far end must bind
 //   remote_port; there is no key for that which every player knows (srt-live-transmit `port`,
 //   FFmpeg none and 8.1 rejects unknown keys, VLC no rendezvous), so the UI says it instead.
-// An empty `host` is the first non-loopback IPv4. A port of 0 gives an empty URL.
+// An empty `host` is the first non-loopback IPv4. A non-empty `publicHost` (SRT_PEER_URL_HOST)
+// replaces both local_address and `host`. A port of 0 gives an empty URL.
 // The passphrase (and pbkeylen when it is not 16) is added only with `withSecret`.
-std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret);
+std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret, std::string const& publicHost = {});
 } // namespace srtgw
