@@ -234,7 +234,7 @@ HttpResponse Api::handle(HttpRequest const& request) const
                     {
                         if (channel.id == id)
                         {
-                            return text(200, std::string("{\"peer_url\":\"") + log::jsonEscape(peerUrl(channel.srt, config.hostAddress, secrets))
+                            return text(200, std::string("{\"peer_url\":\"") + log::jsonEscape(peerUrl(channel.srt, config.hostAddress, secrets, config.peerUrlHost))
                                     + "\",\"passphrase_set\":" + (channel.srt.passphrase.empty() ? "false" : "true") + "}");
                         }
                     }

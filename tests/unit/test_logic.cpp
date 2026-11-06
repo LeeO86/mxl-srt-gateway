@@ -1275,6 +1275,28 @@ TEST_CASE("peer URL without a port is empty, without an announced address uses t
     CHECK(peerUrl(srt, "", false).rfind("srt://:", 0) != 0);
 }
 
+TEST_CASE("SRT_PEER_URL_HOST replaces the host of a listener and rendezvous peer URL only")
+{
+    SrtEndpointConfig srt;
+    srt.mode = "listener";
+    srt.localPort = 9001;
+    srt.latencyMs = 120;
+    CHECK(peerUrl(srt, "10.42.1.95", false, "srt-edge.example") == "srt://srt-edge.example:9001?mode=caller&latency=120");
+    srt.localAddress = "10.42.1.95";
+    CHECK(peerUrl(srt, "10.42.1.95", false, "203.0.113.7") == "srt://203.0.113.7:9001?mode=caller&latency=120");
+    CHECK(peerUrl(srt, "10.42.1.95", false, "2001:db8::7") == "srt://[2001:db8::7]:9001?mode=caller&latency=120");
+    srt.mode = "rendezvous";
+    CHECK(peerUrl(srt, "10.42.1.95", false, "srt-edge.example") == "srt://srt-edge.example:9001?mode=rendezvous&latency=120");
+    srt.mode = "caller";
+    srt.remotePort = 6000;
+    CHECK(peerUrl(srt, "10.42.1.95", false, "srt-edge.example") == "srt://0.0.0.0:6000?mode=listener&latency=120");
+
+    CHECK(loadFromSources({}, "", {{"SRT_PEER_URL_HOST", "srt-edge.example"}}).config.peerUrlHost == "srt-edge.example");
+    CHECK(loadFromSources({}, "", {}).config.peerUrlHost.empty());
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"SRT_PEER_URL_HOST", "edge/x?y"}}), ConfigError);
+    CHECK_THROWS_AS(loadFromSources({}, "", {{"SRT_PEER_URL_HOST", "edge x"}}), ConfigError);
+}
+
 TEST_CASE("peer URL has the passphrase only when asked for it")
 {
     SrtEndpointConfig srt;

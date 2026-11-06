@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+### Features
+
+- `SRT_PEER_URL_HOST` (default empty): the host name or IP in the channels' `peer_url` (status, the UI's copyable line and `GET /api/v1/channels/:id/peer-url`) instead of `local_address` and the announced address. In a pod the announced address is the pod IP, which nobody outside the cluster can reach; set this to the node's or an edge's address. A caller channel's URL (`srt://0.0.0.0:…?mode=listener`) does not change. Nothing else uses it (NMOS, IS-05 and the request line keep `NMOS_HOST_ADDRESS`).
+
 ## 1.5.0
 
 ### Features

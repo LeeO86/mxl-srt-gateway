@@ -99,6 +99,7 @@ the secret; they are never logged and are omitted from the API unless
 | `NMOS_QUERY_PORT` | registry port + 1 | Query API port. The registry's Query WebSocket is that port + 1 (`P+2` when registration is `P`) |
 | `NMOS_DNS_SD` | `false` | `false` disables DNS-SD browse and mDNS advertisement (`pri` and `highest_pri` are max int). No Avahi daemon is required |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | address announced on the node, in IS-05, and in the UI request line. Must be an IPv4 literal, not `0.0.0.0`, `127.0.0.1` or a hostname. `SRTGW_PUBLIC_IP` is the same setting |
+| `SRT_PEER_URL_HOST` | empty | host name or IP in the channels' `peer_url` (the copyable `srt://` line) instead of the announced address, e.g. the node's or an edge's name when the announced address is a pod IP that nobody outside the cluster can reach. Only the peer URL uses it |
 | `HOST_ID` | hostname | identity used in the default seed. It is not announced as an address |
 | `LOG_LEVEL` | `info` | |
 | `SRTGW_CONFIG_FILE` | unset | JSON file of the settings above plus `channels` |
@@ -284,12 +285,14 @@ srt-live-transmit: a player for an egress channel, a sender for an ingest.
 - **Listener channel:** `srt://<host>:<local_port>?mode=caller&latency=<ms>`,
   plus `&streamid=<id>` with the first of `accepted_streamids`. `<host>` is the
   channel's `local_address` when it is a specific address, else the announced
-  address (`NMOS_HOST_ADDRESS`, the same as in the UI's request line). Behind
-  NAT (`exposure=internet`) the far end uses the public address instead.
+  address (`NMOS_HOST_ADDRESS`, the same as in the UI's request line).
+  `SRT_PEER_URL_HOST` replaces both, for a pod IP or a NAT (`exposure=internet`)
+  where the far end uses another address.
 - **Caller channel:** the gateway calls out, so the far end must **listen**:
   `srt://0.0.0.0:<remote_port>?mode=listener&latency=<ms>`. The stream id is
   what the gateway sends, so the listener needs none.
-- **Rendezvous channel:** `srt://<host>:<local_port>?mode=rendezvous&latency=<ms>`;
+- **Rendezvous channel:** `srt://<host>:<local_port>?mode=rendezvous&latency=<ms>`
+  (`<host>` as for a listener);
   the far end must bind its local port to the channel's `remote_port`. The URL
   has no key for that: srt-live-transmit calls it `port`, FFmpeg has none (it
   binds the URL's port, so it works only when both ports are equal) and

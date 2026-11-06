@@ -43,6 +43,7 @@ const DESCRIPTIONS = {
   NMOS_DNS_SD: "DNS-SD browsing and mDNS advertisement.",
   NMOS_HOST_ADDRESS: "IPv4 announced to NMOS, in IS-05 and in the SRT address lines.",
   SRTGW_PUBLIC_IP: "Old name of NMOS_HOST_ADDRESS.",
+  SRT_PEER_URL_HOST: "Host in the copyable srt:// lines (empty: the channel's or the announced address).",
   HOST_ID: "Identity in the default seed and label. Not an announced address.",
   LOG_LEVEL: "error, warn, info, debug or trace. Applies at once.",
 };

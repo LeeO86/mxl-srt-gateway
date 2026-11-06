@@ -464,7 +464,7 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << ",\"audio\":" << status.avResyncsAudio << "}" << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
         << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"peer_url\":\""
-        << jsonEscape(peerUrl(channel.srt, config.hostAddress, false)) << "\",\"connect_failures\":" << status.connectFailure.total
+        << jsonEscape(peerUrl(channel.srt, config.hostAddress, false, config.peerUrlHost)) << "\",\"connect_failures\":" << status.connectFailure.total
         << ",\"last_failure\":\"" << jsonEscape(status.connectFailure.reason) << "\",\"last_failure_at\":\"" << jsonEscape(status.connectFailure.at)
         << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
         << ",\"loss\":" << status.srt.pktLoss << ",\"retrans\":" << status.srt.pktRetrans << ",\"drop\":" << status.srt.pktDrop

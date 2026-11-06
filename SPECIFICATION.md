@@ -493,6 +493,7 @@ the writer finding it and locking it would delete it under the writer.
 | `NMOS_LABEL` | unset | node and device label. Unset keeps the previous labels |
 | `NMOS_TAGS` | empty | JSON object of tag to string array, on the node and device |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | announced address. `SRTGW_PUBLIC_IP` is the same setting |
+| `SRT_PEER_URL_HOST` | empty | host name or IP in `peer_url` instead of `local_address` and the announced address (§9). Only the peer URL uses it |
 | `WEB_PORT` | 8120 | UI, REST, health, metrics, widgets |
 | `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the widget pages (§7.1). `;`, `,` or control characters are invalid |
 | `LOG_LEVEL` | `info` | JSON logs |

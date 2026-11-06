@@ -172,6 +172,7 @@ void ConfigStore::replaceGlobals(std::map<std::string, std::string> const& value
         {"LOG_LEVEL", loaded_.config.logLevel},
         {"NMOS_HOST_ADDRESS", loaded_.config.hostAddress},
         {"SRTGW_PUBLIC_IP", loaded_.config.hostAddress},
+        {"SRT_PEER_URL_HOST", loaded_.config.peerUrlHost},
         {"MXL_HISTORY_DURATION_MS", std::to_string(loaded_.config.historyDurationNs / 1000000)},
         {"SRTGW_HISTORY_DURATION_NS", std::to_string(loaded_.config.historyDurationNs)},
         {"STATE_DIR", loaded_.config.stateDir},
