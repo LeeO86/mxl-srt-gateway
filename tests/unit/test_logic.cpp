@@ -13,6 +13,7 @@
 #include "srt/access.hpp"
 #include "srt/url.hpp"
 #include "util/jsonutil.hpp"
+#include "util/net.hpp"
 #include "util/uuid.hpp"
 #include "version.hpp"
 
@@ -1252,6 +1253,26 @@ TEST_CASE("peer URL of a listener, a caller and a rendezvous channel")
     rendezvous.remoteHost = "198.51.100.7";
     rendezvous.remotePort = 9003;
     CHECK(peerUrl(rendezvous, "10.0.0.5", false) == "srt://10.0.0.5:9002?mode=rendezvous&latency=200");
+    // No key for the far end's local port: FFmpeg 8.1 refuses unknown ones, VLC has no rendezvous.
+    CHECK(peerUrl(rendezvous, "10.0.0.5", false).find("port=") == std::string::npos);
+}
+
+TEST_CASE("peer URL without a port is empty, without an announced address uses the host's")
+{
+    SrtEndpointConfig srt;
+    srt.mode = "listener";
+    CHECK(peerUrl(srt, "10.0.0.5", false).empty());
+    srt.mode = "rendezvous";
+    srt.remotePort = 9003;
+    CHECK(peerUrl(srt, "10.0.0.5", false).empty());
+    srt.mode = "caller";
+    srt.localPort = 9001;
+    srt.remotePort = 0;
+    CHECK(peerUrl(srt, "10.0.0.5", true).empty());
+    srt.mode = "listener";
+    srt.localPort = 9001;
+    CHECK(peerUrl(srt, "", false) == "srt://" + primaryIpv4() + ":9001?mode=caller&latency=200");
+    CHECK(peerUrl(srt, "", false).rfind("srt://:", 0) != 0);
 }
 
 TEST_CASE("peer URL has the passphrase only when asked for it")

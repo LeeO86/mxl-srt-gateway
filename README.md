@@ -263,7 +263,7 @@ level. Its first failed attempt is logged at `warn`, and so is every attempt
 whose reason differs from the one before. The same reason again is `debug`, so a
 far end that stays away for hours costs one line. The lines are
 `srt_connect_failed` (`error`, e.g. `Connection timeout`), `srt_resolve_failed`
-(`host`) and `srt_rejected` (`reason` `passphrase`); the first two have
+(`host`) and `srt_rejected` (`reason` `passphrase`), each with
 `failed_attempts`, the failed attempts in a row so far. When the link connects
 after failed attempts, its `srt_connected` line (info) has `failed_attempts`
 once. The next failure after a connect warns again.
@@ -290,7 +290,14 @@ srt-live-transmit: a player for an egress channel, a sender for an ingest.
   `srt://0.0.0.0:<remote_port>?mode=listener&latency=<ms>`. The stream id is
   what the gateway sends, so the listener needs none.
 - **Rendezvous channel:** `srt://<host>:<local_port>?mode=rendezvous&latency=<ms>`;
-  the far end must bind its local port to the channel's `remote_port`.
+  the far end must bind its local port to the channel's `remote_port`. The URL
+  has no key for that: srt-live-transmit calls it `port`, FFmpeg has none (it
+  binds the URL's port, so it works only when both ports are equal) and
+  FFmpeg 8.1 refuses unknown keys; VLC has no rendezvous mode.
+
+The announced address is the first non-loopback IPv4 when `NMOS_HOST_ADDRESS`
+is not set. A channel without its port has an empty `peer_url`, and the UI
+shows no URL row.
 
 A stream id or passphrase with `&`, `#`, `%`, `+`, a space or `?` is
 percent-encoded; VLC does not decode it, so keep such values to letters,

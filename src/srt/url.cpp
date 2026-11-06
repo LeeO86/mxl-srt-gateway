@@ -1,6 +1,7 @@
 #include "srt/url.hpp"
 
 #include "srt/access.hpp"
+#include "util/net.hpp"
 
 #include <cstdio>
 
@@ -39,6 +40,11 @@ std::string hostPart(std::string const& host)
 std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret)
 {
     int const latency = srt.latencyMs > 0 ? srt.latencyMs : 200;
+    // No port, no URL (the UI hides the row).
+    if ((srt.mode == "caller" ? srt.remotePort : srt.localPort) <= 0)
+    {
+        return {};
+    }
     std::string url;
     std::string streamId;
     if (srt.mode == "caller")
@@ -48,7 +54,7 @@ std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool 
     else
     {
         bool const anyAddress = srt.localAddress.empty() || srt.localAddress == "0.0.0.0" || srt.localAddress == "::";
-        url = "srt://" + hostPart(anyAddress ? host : srt.localAddress) + ":" + std::to_string(srt.localPort);
+        url = "srt://" + hostPart(!anyAddress ? srt.localAddress : !host.empty() ? host : primaryIpv4()) + ":" + std::to_string(srt.localPort);
         url += srt.mode == "rendezvous" ? "?mode=rendezvous" : "?mode=caller";
         if (srt.mode == "listener" && !srt.acceptedStreamIds.empty())
         {

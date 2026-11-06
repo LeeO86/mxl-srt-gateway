@@ -200,18 +200,34 @@ async function copy(text) {
 const shown = ref(false);
 // The peer URL with the passphrase, fetched on request (GET /channels/:id/peer-url?secrets=1); never in the status.
 const revealed = ref("");
-watch([() => c.value?.id, () => s.value?.peer_url, () => c.value?.srt?.passphrase_set], () => (revealed.value = ""));
-async function reveal() {
-  if (revealed.value) {
-    revealed.value = "";
-    return;
-  }
+// Counts reveals and hides: a reply that comes after a newer one, a hide or a channel switch is dropped.
+let revealToken = 0;
+function hideRevealed() {
+  revealToken++;
+  revealed.value = "";
+}
+async function fetchRevealed() {
+  const id = c.value?.id;
+  const token = ++revealToken;
   try {
-    revealed.value = (await api.get(`/api/v1/channels/${encodeURIComponent(c.value.id)}/peer-url?secrets=1`)).peer_url;
+    const url = (await api.get(`/api/v1/channels/${encodeURIComponent(id)}/peer-url?secrets=1`)).peer_url;
+    if (token === revealToken && c.value?.id === id) revealed.value = url;
   } catch (e) {
+    if (token !== revealToken || c.value?.id !== id) return;
+    revealed.value = "";
     live.notice = `Passphrase not shown: ${e.message}`;
   }
 }
+async function reveal() {
+  if (revealed.value) hideRevealed();
+  else await fetchRevealed();
+}
+watch([() => c.value?.id, () => s.value?.peer_url, () => c.value?.srt?.passphrase_set], hideRevealed);
+// The channel is saved or reloaded (a new object, every 5 s): a shown URL is fetched again, so a
+// changed passphrase does not stay on screen.
+watch(c, () => {
+  if (revealed.value) fetchRevealed();
+});
 const peerUrlNote = computed(() => {
   const mode = c.value?.srt?.mode;
   if (mode === "caller") return `This channel calls out, so the far end must listen on port ${c.value.srt.remote_port}.`;

@@ -225,7 +225,7 @@ bool SrtLink::openSocket(bool listener)
     return true;
 }
 
-void SrtLink::logReject(std::string const& peer, std::string const& reason, std::string const& check, bool warn) const
+void SrtLink::logReject(std::string const& peer, std::string const& reason, std::string const& check, bool warn, std::uint64_t failedAttempts) const
 {
     auto const colon = peer.find(':');
     std::vector<log::Field> fields{{"channel", channelId_}, {"peer", colon == std::string::npos ? peer : peer.substr(0, colon)}, {"reason", reason}};
@@ -233,6 +233,10 @@ void SrtLink::logReject(std::string const& peer, std::string const& reason, std:
     {
         // A second peer turned away by an access check: which one.
         fields.push_back({"check", check});
+    }
+    if (failedAttempts > 0)
+    {
+        fields.push_back({"failed_attempts", std::to_string(failedAttempts)});
     }
     if (warn)
     {
@@ -255,7 +259,7 @@ void SrtLink::failAttempt(std::string const& event, std::string const& detail, s
     }
     if (event == "srt_rejected")
     {
-        logReject(config_.remoteHost, detail, "", warn);
+        logReject(config_.remoteHost, detail, "", warn, run);
         return;
     }
     fields.insert(fields.begin(), {"channel", channelId_});
