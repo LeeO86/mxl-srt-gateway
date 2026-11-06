@@ -13,6 +13,7 @@ cmake --build build -j"$(nproc)"
 SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
+tests/integration/caller_diag.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
 tests/integration/stop.sh ./build/mxl-srt-gateway
 tests/integration/avsync.sh ./build/mxl-srt-gateway
@@ -28,5 +29,6 @@ history is 1 s. Integration tests use 720p25. A domain that is not tmpfs logs
 MXL is optional at configure time (`find_package(mxl)`). Without it the SRT
 pipelines still run and the writers are no-ops. The container and CI link it.
 
-Passphrases are never logged and never returned by the API. Do not add a debug
-print of `SrtEndpointConfig::passphrase`.
+Passphrases are never logged and never returned by the API, except on an
+explicit `?secrets=1` (`GET /api/v1/config/export`, `GET /api/v1/channels/:id/peer-url`).
+Do not add a debug print of `SrtEndpointConfig::passphrase`.

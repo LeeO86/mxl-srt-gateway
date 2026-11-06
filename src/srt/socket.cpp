@@ -225,7 +225,7 @@ bool SrtLink::openSocket(bool listener)
     return true;
 }
 
-void SrtLink::logReject(std::string const& peer, std::string const& reason, std::string const& check) const
+void SrtLink::logReject(std::string const& peer, std::string const& reason, std::string const& check, bool warn, std::uint64_t failedAttempts) const
 {
     auto const colon = peer.find(':');
     std::vector<log::Field> fields{{"channel", channelId_}, {"peer", colon == std::string::npos ? peer : peer.substr(0, colon)}, {"reason", reason}};
@@ -234,7 +234,50 @@ void SrtLink::logReject(std::string const& peer, std::string const& reason, std:
         // A second peer turned away by an access check: which one.
         fields.push_back({"check", check});
     }
-    log::warn("srt_rejected", fields);
+    if (failedAttempts > 0)
+    {
+        fields.push_back({"failed_attempts", std::to_string(failedAttempts)});
+    }
+    if (warn)
+    {
+        log::warn("srt_rejected", fields);
+    }
+    else
+    {
+        log::debug("srt_rejected", fields);
+    }
+}
+
+void SrtLink::failAttempt(std::string const& event, std::string const& detail, std::vector<log::Field> fields)
+{
+    bool warn = false;
+    std::uint64_t run = 0;
+    {
+        std::lock_guard const lock{mutex_};
+        warn = failures_.fail(event + ": " + detail, utcNowIso());
+        run = failures_.run();
+    }
+    if (event == "srt_rejected")
+    {
+        logReject(config_.remoteHost, detail, "", warn, run);
+        return;
+    }
+    fields.insert(fields.begin(), {"channel", channelId_});
+    fields.push_back({"failed_attempts", std::to_string(run)});
+    if (warn)
+    {
+        log::warn(event, fields);
+    }
+    else
+    {
+        log::debug(event, fields);
+    }
+}
+
+ConnectFailure SrtLink::failures() const
+{
+    std::lock_guard const lock{mutex_};
+    return failures_.last();
 }
 
 bool SrtLink::acceptOne(std::atomic<bool> const& stop, AttemptLimiter& limiter)
@@ -420,7 +463,7 @@ bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
     int remoteLength = 0;
     if (!resolve(config_.remoteHost, config_.remotePort, &remote, &remoteLength))
     {
-        log::warn("srt_resolve_failed", {{"channel", channelId_}, {"host", config_.remoteHost}});
+        failAttempt("srt_resolve_failed", config_.remoteHost, {{"host", config_.remoteHost}});
         closeData();
         return false;
     }
@@ -452,13 +495,15 @@ bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
     }
     if (!connected)
     {
-        if (message.find("password") != std::string::npos || message.find("Passphrase") != std::string::npos)
+        // A stop or a shutdown that ends the connect is no failed attempt.
+        bool const stopped = stop.load() || gInterrupted.load();
+        if (!stopped && (message.find("password") != std::string::npos || message.find("Passphrase") != std::string::npos))
         {
-            logReject(config_.remoteHost, "passphrase");
+            failAttempt("srt_rejected", "passphrase", {});
         }
-        else
+        else if (!stopped)
         {
-            log::debug("srt_connect_failed", {{"channel", channelId_}, {"error", message}});
+            failAttempt("srt_connect_failed", message, {{"error", message}});
         }
         closeData();
         return false;
@@ -470,7 +515,13 @@ bool SrtLink::establish(std::atomic<bool> const& stop, AttemptLimiter& limiter)
     stats_.connected = true;
     stats_.peer = peerOf(dataFd_);
     stats_.streamId = config_.streamId;
-    log::info("srt_connected", {{"channel", channelId_}, {"peer", stats_.peer}, {"mode", config_.mode}});
+    std::vector<log::Field> fields{{"channel", channelId_}, {"peer", stats_.peer}, {"mode", config_.mode}};
+    if (auto const failed = failures_.connected(); failed > 0)
+    {
+        // The recovery after failed attempts, once.
+        fields.push_back({"failed_attempts", std::to_string(failed)});
+    }
+    log::info("srt_connected", fields);
     return !stop.load();
 }
 

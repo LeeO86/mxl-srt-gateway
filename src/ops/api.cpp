@@ -1,6 +1,7 @@
 #include "ops/api.hpp"
 
 #include "ops/widgets.hpp"
+#include "srt/url.hpp"
 #include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 #include "version.hpp"
@@ -223,6 +224,21 @@ HttpResponse Api::handle(HttpRequest const& request) const
                 if (path.size() == 5 && path[4] == "stats" && request.method == "GET")
                 {
                     return text(200, channels_.channelJson(id, true));
+                }
+                if (path.size() == 5 && path[4] == "peer-url" && request.method == "GET")
+                {
+                    // Like the config export: the passphrase only on an explicit ?secrets=1.
+                    bool const secrets = request.query.find("secrets=1") != std::string::npos || request.query.find("secrets=true") != std::string::npos;
+                    auto const config = store_.config();
+                    for (auto const& channel : config.channels)
+                    {
+                        if (channel.id == id)
+                        {
+                            return text(200, std::string("{\"peer_url\":\"") + log::jsonEscape(peerUrl(channel.srt, config.hostAddress, secrets))
+                                    + "\",\"passphrase_set\":" + (channel.srt.passphrase.empty() ? "false" : "true") + "}");
+                        }
+                    }
+                    return text(404, "{\"error\":\"not found\"}");
                 }
                 if (path.size() == 5 && path[4] == "thumbnail" && request.method == "GET")
                 {

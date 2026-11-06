@@ -2,11 +2,13 @@
 
 #include "config/config.hpp"
 #include "srt/access.hpp"
+#include "util/logging.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace srtgw
 {
@@ -52,6 +54,8 @@ public:
     bool takeOverPending(AttemptLimiter& limiter);
     [[nodiscard]] SrtStats stats() const;
     [[nodiscard]] bool connected() const;
+    // Caller and rendezvous: the failed connect attempts and the last one's reason.
+    [[nodiscard]] ConnectFailure failures() const;
 
 private:
     bool openSocket(bool listener);
@@ -60,7 +64,12 @@ private:
     // it was rejected (logged with `rejectAs` or the check's reason, and counted).
     int acceptChecked(AttemptLimiter& limiter, char const* rejectAs, std::string* peerText, std::string* streamId);
     void applyOptions(int fd, bool caller) const;
-    void logReject(std::string const& peer, std::string const& reason, std::string const& check = "") const;
+    // `failedAttempts` (a caller's failed attempts in a row) is logged when it is not 0.
+    void logReject(std::string const& peer, std::string const& reason, std::string const& check = "", bool warn = true,
+        std::uint64_t failedAttempts = 0) const;
+    // A failed connect attempt: recorded, and logged as `event` at warn when it is the first one or
+    // its reason changed, else at debug (ConnectFailures).
+    void failAttempt(std::string const& event, std::string const& detail, std::vector<log::Field> fields);
 
     SrtEndpointConfig config_;
     std::string channelId_;
@@ -72,5 +81,6 @@ private:
     int dataFd_ = -1;
     mutable std::mutex mutex_;
     SrtStats stats_;
+    ConnectFailures failures_;
 };
 } // namespace srtgw

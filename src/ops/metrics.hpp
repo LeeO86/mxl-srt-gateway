@@ -18,6 +18,8 @@ struct ChannelMetrics
     double bitrateBps = 0;
     double bufferMs = 0;
     int connected = 0;
+    // Failed connect attempts of the main link (caller and rendezvous).
+    std::uint64_t connectFailures = 0;
     std::uint64_t videoFrames = 0;
     std::uint64_t repeats = 0;
     std::uint64_t drops = 0;

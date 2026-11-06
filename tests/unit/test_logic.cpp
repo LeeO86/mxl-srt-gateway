@@ -11,7 +11,9 @@
 #include "ops/metrics.hpp"
 #include "ops/widgets.hpp"
 #include "srt/access.hpp"
+#include "srt/url.hpp"
 #include "util/jsonutil.hpp"
+#include "util/net.hpp"
 #include "util/uuid.hpp"
 #include "version.hpp"
 
@@ -1195,6 +1197,111 @@ TEST_CASE("access control rejects the wrong streamid and rate limits")
     CHECK(crypto.reason == "passphrase");
 }
 
+TEST_CASE("connect failures warn on the first one and on a new reason")
+{
+    ConnectFailures failures;
+    CHECK(failures.fail("srt_connect_failed: Connection timeout", "2026-01-01T00:00:00.000Z"));
+    CHECK_FALSE(failures.fail("srt_connect_failed: Connection timeout", "2026-01-01T00:00:10.000Z"));
+    CHECK(failures.fail("srt_rejected: passphrase", "2026-01-01T00:00:20.000Z"));
+    CHECK_FALSE(failures.fail("srt_rejected: passphrase", "2026-01-01T00:00:30.000Z"));
+    CHECK(failures.run() == 4);
+    CHECK(failures.last().total == 4);
+    CHECK(failures.last().reason == "srt_rejected: passphrase");
+    CHECK(failures.last().at == "2026-01-01T00:00:30.000Z");
+    CHECK(failures.connected() == 4);
+    CHECK(failures.connected() == 0);
+    // After a connect the same reason warns again; the total and the last reason stay.
+    CHECK(failures.fail("srt_rejected: passphrase", "2026-01-01T00:01:00.000Z"));
+    CHECK(failures.last().total == 5);
+    CHECK(failures.run() == 1);
+}
+
+TEST_CASE("peer URL of a listener, a caller and a rendezvous channel")
+{
+    SrtEndpointConfig srt;
+    srt.mode = "listener";
+    srt.localPort = 9001;
+    srt.latencyMs = 120;
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://10.0.0.5:9001?mode=caller&latency=120");
+    srt.localAddress = "0.0.0.0";
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://10.0.0.5:9001?mode=caller&latency=120");
+    // A listener bound to one address is reached there.
+    srt.localAddress = "127.0.0.1";
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://127.0.0.1:9001?mode=caller&latency=120");
+    srt.localAddress = "fd00::7";
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://[fd00::7]:9001?mode=caller&latency=120");
+    srt.localAddress.clear();
+    // The first accepted stream id, with what would split the query percent-encoded.
+    srt.acceptedStreamIds = {"#!::r=news 1,m=request&x", "other"};
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://10.0.0.5:9001?mode=caller&latency=120&streamid=%23!::r=news%201,m=request%26x");
+    srt.acceptedStreamIds = {"news"};
+    srt.latencyMs = 0;
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://10.0.0.5:9001?mode=caller&latency=200&streamid=news");
+
+    SrtEndpointConfig caller;
+    caller.mode = "caller";
+    caller.remoteHost = "198.51.100.7";
+    caller.remotePort = 6000;
+    caller.latencyMs = 300;
+    caller.streamId = "tx1";
+    // The far end listens; the stream id is what the gateway sends, so the listener needs none.
+    CHECK(peerUrl(caller, "10.0.0.5", false) == "srt://0.0.0.0:6000?mode=listener&latency=300");
+
+    SrtEndpointConfig rendezvous;
+    rendezvous.mode = "rendezvous";
+    rendezvous.localPort = 9002;
+    rendezvous.remoteHost = "198.51.100.7";
+    rendezvous.remotePort = 9003;
+    CHECK(peerUrl(rendezvous, "10.0.0.5", false) == "srt://10.0.0.5:9002?mode=rendezvous&latency=200");
+    // No key for the far end's local port: FFmpeg 8.1 refuses unknown ones, VLC has no rendezvous.
+    CHECK(peerUrl(rendezvous, "10.0.0.5", false).find("port=") == std::string::npos);
+}
+
+TEST_CASE("peer URL without a port is empty, without an announced address uses the host's")
+{
+    SrtEndpointConfig srt;
+    srt.mode = "listener";
+    CHECK(peerUrl(srt, "10.0.0.5", false).empty());
+    srt.mode = "rendezvous";
+    srt.remotePort = 9003;
+    CHECK(peerUrl(srt, "10.0.0.5", false).empty());
+    srt.mode = "caller";
+    srt.localPort = 9001;
+    srt.remotePort = 0;
+    CHECK(peerUrl(srt, "10.0.0.5", true).empty());
+    srt.mode = "listener";
+    srt.localPort = 9001;
+    CHECK(peerUrl(srt, "", false) == "srt://" + primaryIpv4() + ":9001?mode=caller&latency=200");
+    CHECK(peerUrl(srt, "", false).rfind("srt://:", 0) != 0);
+}
+
+TEST_CASE("peer URL has the passphrase only when asked for it")
+{
+    SrtEndpointConfig srt;
+    srt.mode = "listener";
+    srt.localPort = 9001;
+    srt.latencyMs = 120;
+    srt.passphrase = "correct horse&battery";
+    auto const plain = peerUrl(srt, "10.0.0.5", false);
+    CHECK(plain == "srt://10.0.0.5:9001?mode=caller&latency=120");
+    CHECK(plain.find("passphrase") == std::string::npos);
+    CHECK(plain.find("horse") == std::string::npos);
+    // AES-128 is libsrt's default: no pbkeylen.
+    CHECK(peerUrl(srt, "10.0.0.5", true) == "srt://10.0.0.5:9001?mode=caller&latency=120&passphrase=correct%20horse%26battery");
+    srt.exposure = "internet";
+    CHECK(peerUrl(srt, "10.0.0.5", true) == "srt://10.0.0.5:9001?mode=caller&latency=120&passphrase=correct%20horse%26battery&pbkeylen=32");
+    srt.exposure = "internal";
+    srt.pbkeylen = 24;
+    CHECK(peerUrl(srt, "10.0.0.5", true).find("&pbkeylen=24") != std::string::npos);
+    srt.mode = "caller";
+    srt.remotePort = 6000;
+    CHECK(peerUrl(srt, "10.0.0.5", false) == "srt://0.0.0.0:6000?mode=listener&latency=120");
+    CHECK(peerUrl(srt, "10.0.0.5", true) == "srt://0.0.0.0:6000?mode=listener&latency=120&passphrase=correct%20horse%26battery&pbkeylen=24");
+    // No passphrase: nothing to reveal.
+    srt.passphrase.clear();
+    CHECK(peerUrl(srt, "10.0.0.5", true) == peerUrl(srt, "10.0.0.5", false));
+}
+
 TEST_CASE("v210 stride and slate are sized for the raster")
 {
     CHECK(v210Stride(1920) == 5120);
@@ -1423,6 +1530,7 @@ TEST_CASE("metrics render the channel set")
     channel.encodeLatencySum = 0.04;
     channel.encodeLatencyBuckets = {1, 3, 0, 0, 0, 0, 0, 0};
     channel.codecDelayMs = 12.5;
+    channel.connectFailures = 5;
     metrics.channels.push_back(channel);
     auto const text = renderMetrics(metrics);
     CHECK(text.find("mxl_srt_gateway_channel_state{channel=\"in1\"} 4") != std::string::npos);
@@ -1437,6 +1545,7 @@ TEST_CASE("metrics render the channel set")
     CHECK(text.find("mxl_srt_gateway_egress_repeated_frames_total{channel=\"in1\"} 7") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_egress_slate_frames_total{channel=\"in1\"} 2") != std::string::npos);
     CHECK(text.find("mxl_srt_gateway_egress_audio_silent_grains_total{channel=\"in1\"} 0") != std::string::npos);
+    CHECK(text.find("mxl_srt_gateway_srt_connect_failures_total{channel=\"in1\"} 5") != std::string::npos);
     // No GPU gauges: reading them ran nvidia-smi (1.4.2).
     CHECK(text.find("nvdec_sessions") == std::string::npos);
     CHECK(text.find("nvenc_sessions") == std::string::npos);

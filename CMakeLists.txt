@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 project(mxl-srt-gateway
-    VERSION 1.4.7
+    VERSION 1.5.0
     DESCRIPTION "SRT contribution gateway for MXL"
     LANGUAGES CXX
 )
@@ -34,6 +34,7 @@ set(SRTGW_CORE_SOURCES
     src/media/v210.cpp
     src/media/slate.cpp
     src/srt/access.cpp
+    src/srt/url.cpp
     src/mxl/domain_files.cpp
     src/config/config.cpp
     src/config/store.cpp

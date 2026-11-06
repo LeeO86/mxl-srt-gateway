@@ -39,6 +39,7 @@ cmake --build build -j"$(nproc)"
 SRTGW_TEST_SECONDS=8 tests/integration/ci.sh ./build/mxl-srt-gateway
 tests/integration/reopen.sh ./build/mxl-srt-gateway
 tests/integration/reconnect.sh ./build/mxl-srt-gateway
+tests/integration/caller_diag.sh ./build/mxl-srt-gateway
 tests/integration/startup.sh ./build/mxl-srt-gateway
 tests/integration/stop.sh ./build/mxl-srt-gateway
 tests/integration/avsync.sh ./build/mxl-srt-gateway
@@ -74,7 +75,7 @@ there, and `routes.json` for IS-05 activations) lives under `STATE_DIR`
 (default `/config`). Mount that directory if it must survive a restart.
 Passphrases are stored in the config file in plain text, because that file is
 the secret; they are never logged and are omitted from the API unless
-`GET /api/v1/config/export?secrets=1`.
+`GET /api/v1/config/export?secrets=1` or `GET /api/v1/channels/:id/peer-url?secrets=1`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -110,7 +111,8 @@ state, SRT statistics, frames, frame sync, audio, decode and encode rates,
 `mxl_flow_reopens_total` (label `reason`: `recreated`, `stalled`),
 `av_resyncs_total` and `av_resync_jump_ms` (label `essence`: `video`, `audio`),
 `egress_repeated_frames_total`, `egress_slate_frames_total`,
-`egress_audio_silent_grains_total`; per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
+`egress_audio_silent_grains_total`, `srt_connect_failures_total` (failed connect
+attempts of a caller or rendezvous channel's main link); per process `process_resident_bytes`. It has no GPU gauges (1.4.2): the node's
 DCGM exporter has GPU memory and NVENC/NVDEC load. Whether a channel's video
 runs on NVDEC or NVENC is its status's `video_codec_hw` (`nvdec`, `nvenc`,
 `none`) and the `codec_opened` log line of each decoder or encoder open, with
@@ -122,6 +124,7 @@ REST, all under `/api/v1`: `GET /status`, `GET /info`, `GET /nmos`,
 `?secrets=1`), `POST /config/import`, `GET|POST /channels`,
 `GET|PUT|DELETE /channels/:id`, `PUT /channels/:id/matrix`,
 `POST /channels/:id/route`, `GET /channels/:id/status`, `GET /channels/:id/thumbnail`,
+`GET /channels/:id/peer-url` (`?secrets=1`, below),
 WebSocket `/api/v1/events`. Outside it: `GET /widgets` and `GET /widget/channel-status`
 (below). `GET /info` has the versions, the node label, the
 announced address and the config file. `GET /domains` lists the MXL domains
@@ -134,7 +137,7 @@ SRT statistics and meters), Channels (all channel settings, new, enable,
 delete, the egress MXL source), Audio (ingest matrix, egress tracks), NMOS &
 MXL, Status and Settings (origins, export, import). Edits stay drafts until
 they are applied, across tab switches and reconnects. Passphrases are
-write-only.
+write-only; only the peer URL's "With passphrase" button shows one (below).
 
 Widgets: operator screens can frame one channel. `GET /widgets` lists the widgets as
 `[{id, title, params, min_size, version}]` (`params` is a JSON schema of the
@@ -252,6 +255,62 @@ neither `egress.audio_tracks` nor `egress.audio_preset` keeps the channel
 default, 8 stereo AAC tracks of MXL channels 1–16 (`8x-stereo-aac`); on the
 lab host those 8 encoders take about 0.9 of a core in the egress loop. Set
 `audio_preset` (`stereo` is one track of channels 1–2) or the tracks.
+
+## Caller failures and the peer URL
+
+A caller (or rendezvous) channel that cannot connect says so at the default log
+level. Its first failed attempt is logged at `warn`, and so is every attempt
+whose reason differs from the one before. The same reason again is `debug`, so a
+far end that stays away for hours costs one line. The lines are
+`srt_connect_failed` (`error`, e.g. `Connection timeout`), `srt_resolve_failed`
+(`host`) and `srt_rejected` (`reason` `passphrase`), each with
+`failed_attempts`, the failed attempts in a row so far. When the link connects
+after failed attempts, its `srt_connected` line (info) has `failed_attempts`
+once. The next failure after a connect warns again.
+
+The channel status (`GET /api/v1/status`, `GET /api/v1/channels/:id/status`)
+has, for the main link:
+
+| Field | Meaning |
+| --- | --- |
+| `connect_failures` | failed connect attempts since the channel started (also `srt_connect_failures_total`) |
+| `last_failure` | the last one, `<event>: <detail>`, e.g. `srt_connect_failed: Connection timeout`; empty when none. It stays after a connect |
+| `last_failure_at` | when, UTC, ISO 8601 with ms (`2026-01-31T12:00:00.250Z`) |
+| `peer_url` | the `srt://` URL the far end opens, never with the passphrase |
+
+`peer_url` is what the other side puts into ffplay, VLC, ffmpeg or
+srt-live-transmit: a player for an egress channel, a sender for an ingest.
+
+- **Listener channel:** `srt://<host>:<local_port>?mode=caller&latency=<ms>`,
+  plus `&streamid=<id>` with the first of `accepted_streamids`. `<host>` is the
+  channel's `local_address` when it is a specific address, else the announced
+  address (`NMOS_HOST_ADDRESS`, the same as in the UI's request line). Behind
+  NAT (`exposure=internet`) the far end uses the public address instead.
+- **Caller channel:** the gateway calls out, so the far end must **listen**:
+  `srt://0.0.0.0:<remote_port>?mode=listener&latency=<ms>`. The stream id is
+  what the gateway sends, so the listener needs none.
+- **Rendezvous channel:** `srt://<host>:<local_port>?mode=rendezvous&latency=<ms>`;
+  the far end must bind its local port to the channel's `remote_port`. The URL
+  has no key for that: srt-live-transmit calls it `port`, FFmpeg has none (it
+  binds the URL's port, so it works only when both ports are equal) and
+  FFmpeg 8.1 refuses unknown keys; VLC has no rendezvous mode.
+
+The announced address is the first non-loopback IPv4 when `NMOS_HOST_ADDRESS`
+is not set. A channel without its port has an empty `peer_url`, and the UI
+shows no URL row.
+
+A stream id or passphrase with `&`, `#`, `%`, `+`, a space or `?` is
+percent-encoded; VLC does not decode it, so keep such values to letters,
+digits and `-._~` when VLC is the far end (VLC 3.0.17 or later reads the
+query; VLC 3.0.24 or later can listen; CHANGELOG has the details). `latency` is in milliseconds, as libsrt and srt-live-transmit
+read it. FFmpeg reads `latency` in microseconds, but SRT uses the larger of the
+two sides' latencies, so the gateway's value still applies.
+
+`GET /api/v1/channels/:id/peer-url` answers `{"peer_url", "passphrase_set"}`;
+with `?secrets=1` the URL has `&passphrase=` (and `&pbkeylen=` when the key is
+not AES-128), like the config export. The Channels tab shows the URL under the
+request line with a Copy button and, for a channel with a passphrase, a "With
+passphrase" button that fetches that.
 
 ## Layout
 

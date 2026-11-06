@@ -9,7 +9,7 @@ import Pill from "./Pill.vue";
 import RoutePanel from "./RoutePanel.vue";
 import Segmented from "./Segmented.vue";
 import SrtEndpoint from "./SrtEndpoint.vue";
-import { STATE_TEXT, copyText, fmtBitrate, num, stateKind } from "../api.js";
+import { STATE_TEXT, api, copyText, fmtBitrate, num, stateKind } from "../api.js";
 import {
   NEW,
   applyDraft,
@@ -198,6 +198,43 @@ async function copy(text) {
   live.notice = (await copyText(text)) ? "Copied." : "Copy failed; select the text and copy it by hand.";
 }
 const shown = ref(false);
+// The peer URL with the passphrase, fetched on request (GET /channels/:id/peer-url?secrets=1); never in the status.
+const revealed = ref("");
+// Counts reveals and hides: a reply that comes after a newer one, a hide or a channel switch is dropped.
+let revealToken = 0;
+function hideRevealed() {
+  revealToken++;
+  revealed.value = "";
+}
+async function fetchRevealed() {
+  const id = c.value?.id;
+  const token = ++revealToken;
+  try {
+    const url = (await api.get(`/api/v1/channels/${encodeURIComponent(id)}/peer-url?secrets=1`)).peer_url;
+    if (token === revealToken && c.value?.id === id) revealed.value = url;
+  } catch (e) {
+    if (token !== revealToken || c.value?.id !== id) return;
+    revealed.value = "";
+    live.notice = `Passphrase not shown: ${e.message}`;
+  }
+}
+async function reveal() {
+  if (revealed.value) hideRevealed();
+  else await fetchRevealed();
+}
+watch([() => c.value?.id, () => s.value?.peer_url, () => c.value?.srt?.passphrase_set], hideRevealed);
+// The channel is saved or reloaded (a new object, every 5 s): a shown URL is fetched again, so a
+// changed passphrase does not stay on screen.
+watch(c, () => {
+  if (revealed.value) fetchRevealed();
+});
+const peerUrlNote = computed(() => {
+  const mode = c.value?.srt?.mode;
+  if (mode === "caller") return `This channel calls out, so the far end must listen on port ${c.value.srt.remote_port}.`;
+  if (mode === "rendezvous") return `The far end must use rendezvous with local port ${c.value.srt.remote_port}.`;
+  return egress.value ? "Opens this channel in ffplay, VLC or srt-live-transmit." : "Where a sender (ffmpeg, srt-live-transmit) sends to.";
+});
+const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 const decoderGlobal = computed(() => live.config?.DECODER);
 const encoderGlobal = computed(() => live.config?.ENCODER);
 const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
@@ -523,6 +560,13 @@ const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
           </dd>
           <dt>Peer</dt>
           <dd>{{ s?.peer || "–" }}<span v-if="s?.srt?.streamid" class="muted"> · stream ID {{ s.srt.streamid }}</span></dd>
+          <template v-if="s?.last_failure">
+            <dt>Last failure</dt>
+            <dd>
+              {{ s.last_failure }}
+              <span class="muted" :title="`${s.last_failure_at} (UTC)`"> · {{ fmtTime(s.last_failure_at) }} · {{ s.connect_failures }} failed attempts</span>
+            </dd>
+          </template>
           <dt>RTT</dt>
           <dd>{{ s?.srt?.connected ? `${num(s.srt.rtt_ms, 1)} ms` : "–" }}</dd>
           <dt>{{ egress ? "Send rate" : "Receive rate" }}</dt>
@@ -552,6 +596,14 @@ const anyDirty = (id) => isDirty(id) || Boolean(routeEdits[id]);
           <code :title="s.request">{{ s.request }}</code>
           <button class="btn small secondary" title="What the network team or the far end needs" @click="copy(s.request)">Copy</button>
         </div>
+        <div v-if="s?.peer_url" class="urlrow">
+          <code :title="peerUrlNote">{{ revealed || s.peer_url }}</code>
+          <button v-if="c.srt?.passphrase_set" class="btn small secondary" :title="revealed ? 'Hide the passphrase' : 'Show the URL with the passphrase'" @click="reveal">
+            {{ revealed ? "Hide passphrase" : "With passphrase" }}
+          </button>
+          <button class="btn small secondary" :title="peerUrlNote" @click="copy(revealed || s.peer_url)">Copy</button>
+        </div>
+        <p v-if="s?.peer_url" class="note">{{ peerUrlNote }}<span v-if="c.srt?.passphrase_set && !revealed"> The channel has a passphrase: the far end needs it too.</span></p>
       </div>
 
       <RoutePanel v-if="egress" :id="c.id" />

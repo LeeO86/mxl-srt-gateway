@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <ctime>
 
 namespace srtgw
 {
@@ -293,6 +294,19 @@ std::uint64_t taiNowNs()
 std::int64_t monoNowMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+std::string utcNowIso()
+{
+    auto const now = std::chrono::system_clock::now();
+    auto const ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    std::time_t const seconds = static_cast<std::time_t>(ms / 1000);
+    std::tm utc{};
+    gmtime_r(&seconds, &utc);
+    char text[64];
+    std::snprintf(text, sizeof(text), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min,
+        utc.tm_sec, static_cast<int>(ms % 1000));
+    return text;
 }
 
 bool tcpBindAvailable(int port, std::string* error)
