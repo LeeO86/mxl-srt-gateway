@@ -1,0 +1,17 @@
+#pragma once
+
+#include "config/config.hpp"
+
+#include <string>
+
+namespace srtgw
+{
+// The srt:// URL the far end of a channel opens (README "Peer URL"): a player such as ffplay or
+// VLC for an egress, a sender for an ingest.
+// - listener: srt://<host>:<local_port>?mode=caller&latency=<ms>[&streamid=<first accepted id>].
+//   <host> is local_address when it is a specific address, else `host` (the announced address).
+// - caller: the far end must listen on remote_port: srt://0.0.0.0:<remote_port>?mode=listener&latency=<ms>.
+// - rendezvous: srt://<host>:<local_port>?mode=rendezvous&latency=<ms>.
+// The passphrase (and pbkeylen when it is not 16) is added only with `withSecret`.
+std::string peerUrl(SrtEndpointConfig const& srt, std::string const& host, bool withSecret);
+} // namespace srtgw

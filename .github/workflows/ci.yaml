@@ -91,6 +91,9 @@ jobs:
       - name: SRT reconnect
         run: tests/integration/reconnect.sh ./build/mxl-srt-gateway
 
+      - name: Caller diagnostics and peer URLs
+        run: tests/integration/caller_diag.sh ./build/mxl-srt-gateway
+
       - name: Source PTS wrap after 26.5 h
         run: tests/integration/pts_wrap.sh ./build/mxl-srt-gateway
 

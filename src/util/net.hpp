@@ -18,6 +18,8 @@ int httpDelete(std::string const& host, int port, std::string const& path, int t
 bool ipv4InCidr(std::string_view ip, std::string_view cidr);
 std::uint64_t taiNowNs();
 std::int64_t monoNowMs();
+// The wall clock (UTC) as ISO 8601 with milliseconds, e.g. 2026-01-31T12:00:00.250Z.
+std::string utcNowIso();
 // Bind and release a TCP socket on 0.0.0.0:port.
 bool tcpBindAvailable(int port, std::string* error);
 } // namespace srtgw

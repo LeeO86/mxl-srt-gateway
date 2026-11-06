@@ -216,6 +216,7 @@ struct BytePipe
     bool up = false;
     std::string peer;
     SrtStats stats;
+    ConnectFailure failures;
     // Counts SRT connections: a new one is a new stream (new PIDs, timestamps, format).
     std::uint64_t generation = 0;
 
@@ -705,7 +706,13 @@ void IngestPipeline::runLink(bool backup)
     int backoffMs = 1000;
     while (!stop_.load() && !srtInterrupted())
     {
-        if (!link.establish(stop_, limiter))
+        bool const established = link.establish(stop_, limiter);
+        {
+            auto& pipe = backup ? shared_->backupPipe : shared_->mainPipe;
+            std::lock_guard const lock{pipe.mu};
+            pipe.failures = link.failures();
+        }
+        if (!established)
         {
             sleepUnlessStopped(stop_, backoffMs);
             backoffMs = std::min(10000, backoffMs * 2);
@@ -1604,6 +1611,7 @@ void IngestPipeline::runClock()
         std::vector<Shared::AudioQ> audioCopy;
         bool failover = false;
         SrtStats srtStats;
+        ConnectFailure connectFailure;
         std::string peer;
         double decodeFps = 0;
         double codecDelayMs = 0;
@@ -1708,6 +1716,7 @@ void IngestPipeline::runClock()
             std::lock_guard const lock{shared_->mainPipe.mu};
             srtStats = shared_->active == 1 ? shared_->backupPipe.stats : shared_->mainPipe.stats;
             peer = shared_->active == 1 ? shared_->backupPipe.peer : shared_->mainPipe.peer;
+            connectFailure = shared_->mainPipe.failures;
             if (!shared_->mainPipe.up && shared_->active == 0)
             {
                 srtStats.connected = false;
@@ -1896,6 +1905,7 @@ void IngestPipeline::runClock()
         }
         status.peer = peer;
         status.srt = srtStats;
+        status.connectFailure = connectFailure;
         status.sourceFormat = sourceFormat;
         status.targetFormat = config_.target.label();
         status.decoder = decoder;
@@ -2899,6 +2909,7 @@ void EgressPipeline::run()
         status.codecDelayMs = codecDelayMs;
         status.srt = primary.stats();
         status.peer = status.srt.peer;
+        status.connectFailure = primary.failures();
         status.sourceFormat = source.label();
         status.targetFormat = config_.target.label();
         status.encoder = status_.encoder;

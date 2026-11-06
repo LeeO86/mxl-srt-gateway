@@ -71,6 +71,8 @@ struct PipelineStatus
     double encodeLatencySum = 0;
     std::vector<std::uint64_t> latencyBuckets = std::vector<std::uint64_t>(8, 0);
     std::string request;
+    // The main link's failed connect attempts (caller and rendezvous).
+    ConnectFailure connectFailure;
 };
 
 struct FlowRoute

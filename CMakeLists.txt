@@ -34,6 +34,7 @@ set(SRTGW_CORE_SOURCES
     src/media/v210.cpp
     src/media/slate.cpp
     src/srt/access.cpp
+    src/srt/url.cpp
     src/mxl/domain_files.cpp
     src/config/config.cpp
     src/config/store.cpp

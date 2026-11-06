@@ -66,6 +66,7 @@ std::string renderMetrics(ProcessMetrics const& metrics)
         gauge(out, "srt_bitrate_bps", id, channel.bitrateBps);
         gauge(out, "srt_buffer_ms", id, channel.bufferMs);
         gauge(out, "srt_connected", id, channel.connected);
+        counter(out, "srt_connect_failures_total", id, channel.connectFailures);
         counter(out, "video_frames_out_total", id, channel.videoFrames);
         counter(out, "framesync_repeats_total", id, channel.repeats);
         counter(out, "framesync_drops_total", id, channel.drops);

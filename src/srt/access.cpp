@@ -32,6 +32,23 @@ void AttemptLimiter::record(std::string const& ip, std::int64_t nowMs)
     }
 }
 
+bool ConnectFailures::fail(std::string const& reason, std::string const& at)
+{
+    bool const warn = run_ == 0 || reason != last_.reason;
+    ++run_;
+    ++last_.total;
+    last_.reason = reason;
+    last_.at = at;
+    return warn;
+}
+
+std::uint64_t ConnectFailures::connected()
+{
+    auto const failed = run_;
+    run_ = 0;
+    return failed;
+}
+
 int effectiveKeyLength(AccessPolicy const& policy)
 {
     if (policy.pbkeylen == 16 || policy.pbkeylen == 24 || policy.pbkeylen == 32)

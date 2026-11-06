@@ -431,7 +431,11 @@ corporate firewall. Therefore:
   domains), WebSocket `/api/v1/events`; `/livez`, `/readyz`, `/statusz`,
   `/metrics` on `WEB_PORT`.
 - Unauthenticated by design (lab network), like the siblings; SRT passphrases are
-  write-only in the UI and never returned by the API.
+  write-only in the UI and returned by the API only on an explicit `?secrets=1`
+  (`GET /config/export`, `GET /channels/:id/peer-url`: the far end's `srt://` URL).
+- Each channel's status has `peer_url` (the `srt://` URL the far end opens, without
+  the passphrase), `connect_failures`, `last_failure` and `last_failure_at` (UTC) of
+  its main link (README, "Caller failures and the peer URL").
 
 ### 7.1 Widgets (1.4.0, operator screens)
 
@@ -512,7 +516,8 @@ readers opened again because their flow was re-created or its head stalled,
 §6.1), `av_resyncs_total` and `av_resync_jump_ms` (label `essence` `video` or
 `audio`: ingest re-anchors, §5.4, and the last one's size in ms),
 `egress_repeated_frames_total`, `egress_slate_frames_total` and
-`egress_audio_silent_grains_total` (§6.1), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
+`egress_audio_silent_grains_total` (§6.1), `srt_connect_failures_total` (failed
+connect attempts of a caller or rendezvous main link), plus process. No GPU gauges (removed in 1.4.2): each read ran `nvidia-smi`,
 which adds load on the GPU's management processor (GSP); the node's DCGM
 exporter has GPU memory, NVENC/NVDEC utilisation, temperature and clocks.
 Each open of a video decoder or encoder logs `codec_opened` with `channel`,

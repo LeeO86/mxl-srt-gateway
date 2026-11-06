@@ -1,6 +1,7 @@
 #include "channel/runtime.hpp"
 
 #include "nmos/ids.hpp"
+#include "srt/url.hpp"
 #include "util/jsonutil.hpp"
 #include "util/logging.hpp"
 #include "util/net.hpp"
@@ -432,7 +433,8 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
     }
     ChannelConfig channel;
     bool haveChannel = false;
-    for (auto const& item : store_.config().channels)
+    auto const config = store_.config();
+    for (auto const& item : config.channels)
     {
         if (item.id == id)
         {
@@ -461,7 +463,10 @@ std::string ChannelManager::channelJson(std::string const& id, bool wrapped) con
         << ",\"audio_drift_ppm\":" << status.driftPpm << ",\"audio_fifo_ms\":" << status.fifoMs << ",\"av_resyncs\":{\"video\":" << status.avResyncsVideo
         << ",\"audio\":" << status.avResyncsAudio << "}" << ",\"decode_fps\":" << status.decodeFps << ",\"codec_delay_ms\":" << status.codecDelayMs
         << ",\"encode_fps\":" << status.encodeFps << ",\"failover_active\":" << (status.failover ? "true" : "false") << ",\"timecode\":\""
-        << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
+        << jsonEscape(status.timecode) << "\",\"request\":\"" << jsonEscape(status.request) << "\",\"peer_url\":\""
+        << jsonEscape(peerUrl(channel.srt, config.hostAddress, false)) << "\",\"connect_failures\":" << status.connectFailure.total
+        << ",\"last_failure\":\"" << jsonEscape(status.connectFailure.reason) << "\",\"last_failure_at\":\"" << jsonEscape(status.connectFailure.at)
+        << "\",\"srt\":{\"rtt_ms\":" << status.srt.rttMs
         << ",\"loss\":" << status.srt.pktLoss << ",\"retrans\":" << status.srt.pktRetrans << ",\"drop\":" << status.srt.pktDrop
         << ",\"bitrate_bps\":" << status.srt.bitrateBps << ",\"buffer_ms\":" << status.srt.bufferMs << ",\"connected\":"
         << (status.srt.connected ? "true" : "false") << ",\"streamid\":\"" << jsonEscape(status.srt.streamId) << "\"},\"meters\":[";
@@ -545,6 +550,7 @@ ProcessMetrics ChannelManager::metrics() const
         item.bitrateBps = status.srt.bitrateBps;
         item.bufferMs = status.srt.bufferMs;
         item.connected = status.srt.connected ? 1 : 0;
+        item.connectFailures = status.connectFailure.total;
         item.videoFrames = status.frames;
         item.repeats = status.repeats;
         item.drops = status.drops;
