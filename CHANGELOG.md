@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- A caller channel whose far end is not there is now visible at the default log level. Until 1.4.7 a caller's failed connect attempts (`srt_connect_failed`, e.g. `Connection timeout`) were logged only at `debug`, so a caller that never connected was silent at `info` and needed `LOG_LEVEL=debug` to see why. Now:
+  - the first failed attempt after a start or a connect is logged at `warn`, and so is each attempt whose reason differs from the last one (`srt_connect_failed` with `error`, `srt_resolve_failed` with `host`, `srt_rejected` with `reason` `passphrase`); the same reason again stays at `debug`. `failed_attempts` is the number of failed attempts in a row;
+  - the recovery is logged once: the `srt_connected` line after failed attempts has `failed_attempts`;
+  - the channel status has `connect_failures` (failed attempts since the channel started), `last_failure` (`<event>: <detail>`, e.g. `srt_connect_failed: Connection timeout`) and `last_failure_at` (UTC, ISO 8601), for the main link, and the Channels tab shows them;
+  - `/metrics` has `mxl_srt_gateway_srt_connect_failures_total{channel}`.
+- Each channel has a copyable `srt://` URL for its far end: `peer_url` in the channel status and a line with a Copy button in the Channels tab. For a listener channel it is what a player (egress) or a sender (ingest) calls: `srt://<host>:<port>?mode=caller&latency=<ms>[&streamid=<first accepted id>]`. For a caller channel the far end must listen: `srt://0.0.0.0:<remote_port>?mode=listener&latency=<ms>`. The host is the listener's `local_address` when it is a specific address, else the announced address (`NMOS_HOST_ADDRESS`). The status never has the passphrase. A channel with a passphrase has a "With passphrase" button in the UI, which reads `GET /api/v1/channels/:id/peer-url?secrets=1` (the URL with `passphrase=`, and `pbkeylen=` when the key is not AES-128), the same opt-in as `GET /api/v1/config/export?secrets=1`. Tested with `tests/integration/caller_diag.sh`.
+
+### Players and the peer URL
+
+Which query parameters of the peer URL each player reads (checked in the players' sources, not all of it tested here):
+
+- **VLC 3.0.0–3.0.16:** reads no query parameters; set `--latency`, `--passphrase` and `--key-length` as options instead. Caller only.
+- **VLC 3.0.17–3.0.23:** reads `latency` (ms), `passphrase`, `streamid`, `mode`, `key-length` (not `pbkeylen`; a receiver takes the key length from the sender, so that does no harm). Caller only, so it opens a listener channel's URL but cannot be the far end of a caller channel.
+- **VLC 3.0.24 and 4.0 (development):** as 3.0.17, plus listener mode with `?mode=listener`, so it can also be the far end of a caller channel.
+- **VLC, every version:** query values are not percent-decoded. A stream id or passphrase with `&`, `#`, `%`, `+`, a space or `?` does not work in VLC.
+- **FFmpeg / ffplay:** `mode`, `passphrase`, `pbkeylen` and `streamid` (since 4.1). `latency` is in **microseconds**, so `latency=120` asks for 0.12 ms; SRT uses the larger latency of the two sides, so the gateway's value still applies. Percent-decoded values since 7.0 (before that only `+` was a space). Since 8.1 an unknown parameter is an error; the peer URL has only parameters FFmpeg knows.
+- **srt-live-transmit:** every SRT option by its name (`latency` in ms, `passphrase`, `pbkeylen`, `streamid`, `mode`); values are percent-decoded since libsrt 1.5.4.
+
+Tested in `tests/integration/caller_diag.sh` with srt-live-transmit 1.5.3 (as the listener of a caller channel and as the player of a listener channel, both with the passphrase URL) and ffprobe 6.1 (the listener channel's URL).
+
 ## 1.4.7
 
 ### Fixes

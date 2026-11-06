@@ -293,7 +293,9 @@ srt-live-transmit: a player for an egress channel, a sender for an ingest.
   the far end must bind its local port to the channel's `remote_port`.
 
 A stream id or passphrase with `&`, `#`, `%`, `+`, a space or `?` is
-percent-encoded. `latency` is in milliseconds, as libsrt and srt-live-transmit
+percent-encoded; VLC does not decode it, so keep such values to letters,
+digits and `-._~` when VLC is the far end (VLC 3.0.17 or later reads the
+query; VLC 3.0.24 or later can listen; CHANGELOG has the details). `latency` is in milliseconds, as libsrt and srt-live-transmit
 read it. FFmpeg reads `latency` in microseconds, but SRT uses the larger of the
 two sides' latencies, so the gateway's value still applies.
 
