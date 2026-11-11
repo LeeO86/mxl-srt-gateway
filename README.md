@@ -5,6 +5,8 @@ directions, on one host.
 
 Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
 
+![mxl-srt-gateway dashboard: an SRT ingest and an egress channel](docs/images/web-ui.png)
+
 - **Ingest (SRT → MXL):** MPEG-TS over SRT, decode, adapt to the target raster,
   frame-synchronise to TAI, write `video/v210` and `audio/float32`.
 - **Egress (MXL → SRT):** read MXL, optionally adapt, encode, mux MPEG-TS, send SRT.
