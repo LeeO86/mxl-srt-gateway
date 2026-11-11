@@ -5,7 +5,7 @@ Status: Draft v0.3 (for implementation by Claude Code or Cursor in a new, empty 
 Changelog: v0.3 — caller and listener mode required for both directions, with a mode table and tests (§5.0). v0.2 — multichannel audio in both directions made a v1 requirement (§5.5, §6.2); SRT sources from internal WAN **and** the internet through the corporate firewall, with the security rules that follow (§5.7, §10); candidate list updated (§13).
 Repository: `LeeO86/mxl-srt-gateway` (name can still change)
 Aligns with: `LeeO86/mxl-decklink`, `LeeO86/mxl-st2110-gateway`, `LeeO86/mxl-fabrics-agent`,
-`LeeO86/mxl-multiviewer`, `LeeO86/mxl-webrtc-monitor`, platform repo `mmz-srf/mxl-poc-platform`
+`LeeO86/mxl-multiviewer`, `LeeO86/mxl-webrtc-monitor`, the (private) platform repository
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119.
 
