@@ -3,6 +3,8 @@
 Bridges compressed SRT contribution streams and uncompressed MXL flows, in both
 directions, on one host.
 
+Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
+
 - **Ingest (SRT → MXL):** MPEG-TS over SRT, decode, adapt to the target raster,
   frame-synchronise to TAI, write `video/v210` and `audio/float32`.
 - **Egress (MXL → SRT):** read MXL, optionally adapt, encode, mux MPEG-TS, send SRT.
